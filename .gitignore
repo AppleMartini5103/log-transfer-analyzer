@@ -81,3 +81,5 @@ server.conf
 # include/ and lib/ are regenerated from the tarball by build_linux.sh / build_window.bat
 3rdparty/libuv/include/
 3rdparty/libuv/lib/
+3rdparty/catch2/include/
+3rdparty/catch2/lib/
