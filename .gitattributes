@@ -1,0 +1,20 @@
+# 크로스 플랫폼 프로젝트 (Windows 클라이언트 + Linux 서버) — 줄 끝을 git이 강제한다.
+# Windows에서 체크아웃해도 .sh는 LF 유지 (CRLF 셔뱅 = bad interpreter).
+
+# 기본: 텍스트 파일은 저장소에 LF로 정규화
+* text=auto eol=lf
+
+# Windows 전용 스크립트만 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 바이너리 — 변환 금지
+*.pdf binary
+*.jpg binary
+*.png binary
+*.pptx binary
+*.tar.gz binary
+*.a binary
+*.so binary
+*.lib binary
+*.dll binary
