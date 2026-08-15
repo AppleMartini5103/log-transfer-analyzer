@@ -7,6 +7,7 @@ add_executable(unit_tests
     test_codec.cpp
     test_framer.cpp
     test_ringbuffer.cpp
+    test_logger.cpp
 )
 
 target_include_directories(unit_tests PRIVATE ${THIRDPARTY_DIR}/catch2/include)

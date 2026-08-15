@@ -4,6 +4,7 @@ add_library(common STATIC
     protocol/Codec.cpp
     protocol/Framer.cpp
     util/Crc32.cpp
+    util/Logger.cpp
     util/SpscRingBuffer.cpp
     util/Version.cpp
 )
