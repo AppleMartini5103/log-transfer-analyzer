@@ -2,6 +2,7 @@
 # Run on both gcc and MSVC: see coding_convention.txt §10.
 add_executable(unit_tests
     test_skeleton.cpp
+    test_protocol.cpp
 )
 
 target_include_directories(unit_tests PRIVATE ${THIRDPARTY_DIR}/catch2/include)
