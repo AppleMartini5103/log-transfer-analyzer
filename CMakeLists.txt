@@ -13,6 +13,15 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
+# AddressSanitizer + UBSan (gcc/clang). 컨벤션 7번의 "제출 전 누수 0 확인"을 상시 실행
+# 가능하게 만든다: cmake -B build-asan -DENABLE_SANITIZERS=ON && ctest --test-dir build-asan
+# 경고 없이 통과하던 dangling string_view를 실제로 잡아낸 도구라 옵션으로 고정해 둔다.
+option(ENABLE_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(ENABLE_SANITIZERS AND NOT MSVC)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # 3rdparty: include/ and lib/ are generated from tarballs by each
 # library's build_linux.sh / build_window.bat (see 3rdparty/*/).
 set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rdparty)

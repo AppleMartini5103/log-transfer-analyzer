@@ -134,18 +134,20 @@ ParseResult parseConfigText(std::string_view text, ServerConfig& out) {
         }
 
         const std::size_t separator = line.find('=');
-        const std::string_view where = " (line " + std::to_string(lineNumber) + ")";
+        // string_view가 아니라 string으로 보관할 것: string_view로 받으면 우변의 임시 string이
+        // 그 줄 끝에서 파괴되어 해제된 스택 메모리를 가리키게 된다 (ASan stack-use-after-scope).
+        // 단위 테스트는 통과했었다 — 해제된 메모리에 옛 내용이 남아 있었을 뿐이다
+        const std::string where = " (line " + std::to_string(lineNumber) + ")";
         if (separator == std::string_view::npos) {
-            return fail("missing '=' in config" + std::string{where} + ": '" +
-                        std::string{line} + "'");
+            return fail("missing '=' in config" + where + ": '" + std::string{line} + "'");
         }
         const std::string_view key = trim(line.substr(0, separator));
         const std::string_view value = trim(line.substr(separator + 1));
         if (key.empty()) {
-            return fail("empty key in config" + std::string{where});
+            return fail("empty key in config" + where);
         }
         if (value.empty()) {
-            return fail("empty value for '" + std::string{key} + "'" + std::string{where});
+            return fail("empty value for '" + std::string{key} + "'" + where);
         }
 
         ParseResult result;
@@ -161,10 +163,10 @@ ParseResult parseConfigText(std::string_view text, ServerConfig& out) {
             out.logPath.assign(value);
         } else {
             // default-deny: 오타가 조용히 무시되면 벤치 결과를 잘못 읽는다
-            return fail("unknown config key: '" + std::string{key} + "'" + std::string{where});
+            return fail("unknown config key: '" + std::string{key} + "'" + where);
         }
         if (!result.ok) {
-            return fail(result.error + std::string{where});
+            return fail(result.error + where);
         }
     }
     return ParseResult{};
