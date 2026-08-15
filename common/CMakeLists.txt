@@ -1,6 +1,7 @@
 # common/: shared protocol/net/util layer (libuv + standard library only —
 # no OS headers; see coding_convention.txt §10)
 add_library(common STATIC
+    util/Crc32.cpp
     util/Version.cpp
 )
 
