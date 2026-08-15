@@ -67,6 +67,14 @@ bool ServerApp::init(std::string& error) {
             return false;
         }
     }
+
+    // 1:1 세션 관리자 — 리스닝 시작 (design 11번)
+    _sessions = std::make_unique<session::SessionManager>(&_loop, _config.chunkSize);
+    rc = _sessions->listen("0.0.0.0", _config.port, kListenBacklog);
+    if (rc != 0) {
+        error = "listen on port " + std::to_string(_config.port) + ": " + uv_strerror(rc);
+        return false;
+    }
     return true;
 }
 
@@ -115,9 +123,11 @@ void ServerApp::shutdown() {
     sigaddset(&mask, SIGINT);
     ::sigprocmask(SIG_BLOCK, &mask, nullptr);
 
-    // 초기화의 역순으로 정리한다 (총괄 원칙 ④).
-    // 지금 존재하는 자원은 시그널 핸들뿐 — 리스너·세션·파서 스레드가 생기면
-    // "리스닝 소켓 닫기 → 활성 세션 CLEANUP → 핸들 close" 순서로 이 앞에 추가된다.
+    // 초기화의 역순으로 정리한다 (총괄 원칙 ④):
+    // 리스닝 소켓 닫기(새 연결 차단) → 활성 세션 CLEANUP → 핸들 close
+    if (_sessions) {
+        _sessions->close();
+    }
     uv_signal_stop(&_sigterm);
     uv_signal_stop(&_sigint);
 

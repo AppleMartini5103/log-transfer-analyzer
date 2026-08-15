@@ -1,8 +1,11 @@
 #pragma once
 
 #include "app/ServerConfig.h"
+#include "session/SessionManager.h"
 
 #include <uv.h>
+
+#include <memory>
 
 // 서버 애플리케이션 — 객체 조립(wiring)과 메인 루프만 담당한다.
 // (design 6번 반면교사: Application.h가 725줄 god class가 된 사례 — 상태 머신·세션은
@@ -15,6 +18,9 @@
 //  종료는 Quit 명령·소켓 에러·타임아웃과 같은 정리 경로로 수렴한다 (총괄 원칙 ③).
 
 namespace server::app {
+
+// listen 백로그 — 1:1 정책상 동시 수락은 1개지만, 대기 연결이 거절되지 않도록 여유를 둔다
+inline constexpr int kListenBacklog = 128;
 
 class ServerApp {
 public:
@@ -38,6 +44,7 @@ private:
 
     ServerConfig _config;
     uv_loop_t _loop{};
+    std::unique_ptr<session::SessionManager> _sessions;
     uv_signal_t _sigterm{};
     uv_signal_t _sigint{};
     bool _loopReady = false;

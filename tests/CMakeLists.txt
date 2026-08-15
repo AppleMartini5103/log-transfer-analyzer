@@ -16,6 +16,7 @@ add_executable(unit_tests
     test_server_config.cpp
     test_daemon.cpp
     test_net.cpp
+    test_session.cpp
 )
 
 target_include_directories(unit_tests PRIVATE

@@ -3,6 +3,7 @@
 add_library(common STATIC
     net/Listener.cpp
     net/TcpSocket.cpp
+    net/Timer.cpp
     protocol/Codec.cpp
     protocol/Framer.cpp
     util/Crc32.cpp
