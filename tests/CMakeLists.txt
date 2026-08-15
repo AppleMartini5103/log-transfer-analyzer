@@ -8,9 +8,13 @@ add_executable(unit_tests
     test_framer.cpp
     test_ringbuffer.cpp
     test_logger.cpp
+    test_line_reassembler.cpp
 )
 
-target_include_directories(unit_tests PRIVATE ${THIRDPARTY_DIR}/catch2/include)
+target_include_directories(unit_tests PRIVATE
+    ${THIRDPARTY_DIR}/catch2/include
+    ${CMAKE_SOURCE_DIR}/server/src
+)
 target_link_libraries(unit_tests PRIVATE common ${CATCH2_LIB})
 
 add_test(NAME unit_tests COMMAND unit_tests)
