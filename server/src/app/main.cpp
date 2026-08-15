@@ -1,14 +1,18 @@
+#include "app/Daemon.h"
+#include "app/ServerApp.h"
 #include "app/ServerConfig.h"
-#include "util/Version.h"
-
-#include <uv.h>
+#include "util/Logger.h"
 
 #include <cstdio>
 
 // 서버 진입점.
-// design 10번 초기화 순서 고정: 인자 파싱 → 데몬화(-d) → 로거 → uv_loop → 스레드 → 실행.
-// 현재 구현된 단계는 [인자 파싱]까지 — 이후 단계는 다음 이슈에서 채운다.
+// design 10번 초기화 순서 고정 — 이 순서를 바꾸면 자식 프로세스에서 데드락이 난다:
+//   시그널 기본값 → 인자 파싱 → 데몬화(-d) → 로거 → uv_loop·시그널 → (스레드) → 실행
+// fork는 호출 스레드만 복제하므로 루프·스레드 생성보다 반드시 먼저다.
 int main(int argc, char** argv) {
+    // SIGPIPE/SIGHUP 무시 — 끊긴 소켓 write가 프로세스를 죽이지 않고 EPIPE로 돌아오게 한다
+    server::app::installProcessSignalDefaults();
+
     server::app::CommandLine cli;
     const server::app::ParseResult parsed = server::app::parseCommandLine(argc, argv, cli);
     if (!parsed.ok) {
@@ -28,16 +32,46 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("%.*s (built %.*s, libuv %s)\n",
-                static_cast<int>(common::kProjectName.size()), common::kProjectName.data(),
-                static_cast<int>(common::buildDate().size()), common::buildDate().data(),
-                uv_version_string());
-    std::printf("  config file   : %s\n", config.configPath.c_str());
-    std::printf("  port          : %u\n", static_cast<unsigned>(config.port));
-    std::printf("  daemonize     : %s\n", config.daemonize ? "yes" : "no");
-    std::printf("  chunk_size    : %zu\n", config.chunkSize);
-    std::printf("  snd_buf_size  : %zu%s\n", config.sendBufferSize,
-                config.sendBufferSize == 0 ? " (kernel autotuning)" : "");
-    std::printf("  log_path      : %s\n", config.logPath.c_str());
-    return 0;
+    // 데몬화는 로거·루프보다 먼저 (fork 함정)
+    if (config.daemonize) {
+        std::string error;
+        if (!server::app::daemonize(error)) {
+            std::fprintf(stderr, "error: daemonize: %s\n", error.c_str());
+            return 1;
+        }
+        // 이 시점부터 stdout은 /dev/null — 로그는 반드시 파일로 가야 한다
+        if (!common::Logger::instance().openFile(config.logPath)) {
+            return 1;  // 알릴 통로가 없다 (stderr도 /dev/null) — 종료 코드로만 보고
+        }
+        std::string pidError;
+        if (!server::app::writePidFile(server::app::kPidFilePath, pidError)) {
+            common::Logger::instance().error(pidError);
+            return 1;
+        }
+        common::Logger::instance().info("Daemonized (pid file " +
+                                        std::string{server::app::kPidFilePath} + ")");
+    }
+
+    server::app::ServerApp app{config};
+    std::string error;
+    if (!app.init(error)) {
+        common::Logger::instance().error("Initialization failed: " + error);
+        if (!config.daemonize) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+        }
+        if (config.daemonize) {
+            server::app::removePidFile(server::app::kPidFilePath);
+        }
+        return 1;
+    }
+
+    const int exitCode = app.run();
+
+    // 종료는 초기화의 역순 — PID 파일 제거 후 로그 플러시
+    if (config.daemonize) {
+        server::app::removePidFile(server::app::kPidFilePath);
+    }
+    common::Logger::instance().flush();
+    common::Logger::instance().close();
+    return exitCode;
 }

@@ -14,6 +14,7 @@ add_executable(unit_tests
     test_skip_reporter.cpp
     test_csv_builder.cpp
     test_server_config.cpp
+    test_daemon.cpp
 )
 
 target_include_directories(unit_tests PRIVATE
