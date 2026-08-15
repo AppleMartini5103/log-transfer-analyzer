@@ -10,6 +10,8 @@ add_executable(unit_tests
     test_logger.cpp
     test_line_reassembler.cpp
     test_log_line_parser.cpp
+    test_stats_collector.cpp
+    test_skip_reporter.cpp
 )
 
 target_include_directories(unit_tests PRIVATE

@@ -1,5 +1,7 @@
 add_library(server_core STATIC
     src/parser/LogLineParser.cpp
+    src/parser/SkipReporter.cpp
+    src/stats/StatsCollector.cpp
 )
 target_include_directories(server_core PUBLIC src)
 target_link_libraries(server_core PUBLIC common)
