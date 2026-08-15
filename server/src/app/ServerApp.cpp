@@ -1,6 +1,7 @@
 #include "app/ServerApp.h"
 
 #include "app/Daemon.h"
+#include "util/SpscRingBuffer.h"
 #include "util/Logger.h"
 
 #include <unistd.h>
@@ -69,7 +70,11 @@ bool ServerApp::init(std::string& error) {
     }
 
     // 1:1 세션 관리자 — 리스닝 시작 (design 11번)
-    _sessions = std::make_unique<session::SessionManager>(&_loop, _config.chunkSize);
+    _sessions = std::make_unique<session::SessionManager>(&_loop, _config.chunkSize,
+                                                         common::kDefaultSlotCount);
+    if (!_sessions->startParser(error)) {
+        return false;  // 파서 스레드 기동 실패 — 데몬화 이후이므로 fork 함정은 없다
+    }
     rc = _sessions->listen("0.0.0.0", _config.port, kListenBacklog);
     if (rc != 0) {
         error = "listen on port " + std::to_string(_config.port) + ": " + uv_strerror(rc);

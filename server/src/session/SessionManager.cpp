@@ -4,14 +4,33 @@
 
 namespace server::session {
 
-SessionManager::SessionManager(uv_loop_t* loop, std::size_t chunkSize, SessionTimeouts timeouts)
+SessionManager::SessionManager(uv_loop_t* loop, std::size_t chunkSize, std::size_t ringSlots,
+                               SessionTimeouts timeouts)
     : _loop(loop),
       _listener(loop),
+      _parser(loop, ringSlots, chunkSize),
       _reaper(std::make_unique<uv_idle_t>()),
       _chunkSize(chunkSize),
       _timeouts(timeouts) {
     uv_idle_init(loop, _reaper.get());
     _reaper->data = this;
+    // 파서 → 루프 방향 신호를 현재 세션으로 라우팅한다. 파서는 상주이고 세션은 오가므로
+    // 관리자가 중간에서 받아 넘긴다 (죽은 세션으로 콜백이 들어가지 않도록)
+    _parser.setHandlers(
+        [this](server::parser::AnalysisResult result) {
+            if (_session) {
+                _session->onAnalysisComplete(std::move(result));
+            }
+        },
+        [this] {
+            if (_session) {
+                _session->resumeReading();
+            }
+        });
+}
+
+bool SessionManager::startParser(std::string& error) {
+    return _parser.start(error);
 }
 
 SessionManager::~SessionManager() {
@@ -33,6 +52,7 @@ int SessionManager::listen(const std::string& ip, std::uint16_t port, int backlo
 
 void SessionManager::close() {
     _closing = true;
+    _parser.stop();  // 종료 플래그 + notify → join (초기화의 역순)
     _listener.close();  // 새 연결 차단이 종료 시퀀스의 첫 단계 (design 10번)
     if (_session) {
         _session.reset();  // 활성 세션은 소멸자에서 소켓을 닫는다 (RAII)
@@ -63,7 +83,8 @@ void SessionManager::acceptIfIdle() {
         return;  // 대기분 없음 — 다음 onConnection을 기다린다
     }
     _pendingConnection = false;
-    _session = std::make_unique<Session>(_loop, std::move(socket), this, _chunkSize, _timeouts);
+    _session =
+        std::make_unique<Session>(_loop, std::move(socket), this, &_parser, _chunkSize, _timeouts);
     if (!_session->start()) {
         _session.reset();
     }

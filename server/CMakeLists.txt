@@ -4,6 +4,7 @@ add_library(server_core STATIC
     src/app/ServerConfig.cpp
     src/csv/CsvBuilder.cpp
     src/parser/LogLineParser.cpp
+    src/parser/ParserThread.cpp
     src/session/Session.cpp
     src/session/SessionManager.cpp
     src/parser/SkipReporter.cpp

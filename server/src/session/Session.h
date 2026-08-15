@@ -1,6 +1,7 @@
 #pragma once
 
 #include "net/ISocket.h"
+#include "parser/ParserThread.h"
 #include "net/Timer.h"
 #include "protocol/Framer.h"
 #include "protocol/protocol.h"
@@ -47,6 +48,10 @@ enum class SessionState : std::uint8_t {
 
 std::string_view stateName(SessionState state);
 
+// 산출물 경로 (design 5번 실행 인터페이스 — 실행 디렉토리 기준 상대 경로)
+inline constexpr const char* kResultCsvPath = "./result.csv";
+inline constexpr const char* kSkipReportPath = "./skip_report.txt";
+
 // 상태별 타임아웃 (0 = 타이머 없음). 테스트는 짧은 값을 주입해 만료를 재현한다
 struct SessionTimeouts {
     std::uint64_t idleMs = common::protocol::kIdleTimeoutMs;          // ①류 30초
@@ -64,8 +69,8 @@ public:
 class Session : public common::net::ISocketCallback {
 public:
     Session(uv_loop_t* loop, std::unique_ptr<common::net::ISocket> socket,
-            ISessionObserver* observer, std::size_t chunkSize,
-            SessionTimeouts timeouts = SessionTimeouts{});
+            ISessionObserver* observer, server::parser::ParserThread* parser,
+            std::size_t chunkSize, SessionTimeouts timeouts = SessionTimeouts{});
     ~Session() override;
 
     Session(const Session&) = delete;
@@ -81,6 +86,10 @@ public:
     std::uint64_t receivedBytes() const { return _receivedBytes; }
     // 세션이 끝난 사유 (로그·테스트 확인용)
     const std::string& finishReason() const { return _finishReason; }
+
+    // 파서 스레드가 uv_async로 깨워 루프 스레드에서 호출한다 (SessionManager가 라우팅)
+    void onAnalysisComplete(server::parser::AnalysisResult result);
+    void resumeReading();  // 링에 여유 생김 → uv_read_start 재개
 
 private:
     // ── ISocketCallback ──
@@ -104,6 +113,7 @@ private:
 
     void verifyAndAck();
     void analyzeAndSendResult();
+    void applyBackpressure();  // 링 가득 → uv_read_stop (50MB 상한 장치)
 
     // 사유를 알리고 닫는다 (검증 실패 ②부류·CRC 불일치)
     void failWithAck(common::protocol::AckStatus status, const std::string& reason);
@@ -120,7 +130,10 @@ private:
     SessionState _state = SessionState::WaitHeader;
     common::protocol::Framer _framer;
 
-    std::vector<char> _readBuffer;  // 다음 이슈에서 링버퍼 슬롯으로 교체된다
+    server::parser::ParserThread* _parser = nullptr;
+    // 헤더·트레일러 등 링에 넣지 않는 바이트용 소형 버퍼. 페이로드는 링 슬롯에 직접 수신된다
+    std::vector<char> _readBuffer;
+    bool _slotAcquired = false;  // onAllocate가 링 슬롯을 내줬는지 (onRead에서 커밋 판단)
     std::uint64_t _fileSize = 0;
     std::uint64_t _receivedBytes = 0;  // 페이로드만 집계 (프리앰블·트레일러 제외)
     std::uint32_t _payloadCrc = 0;     // 루프 스레드 소유 — 트레일러 비교 주체와 같은 스레드

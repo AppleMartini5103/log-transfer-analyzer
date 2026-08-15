@@ -1,6 +1,7 @@
 #pragma once
 
 #include "net/Listener.h"
+#include "parser/ParserThread.h"
 #include "session/Session.h"
 
 #include <uv.h>
@@ -23,7 +24,7 @@ namespace server::session {
 
 class SessionManager : public common::net::IListenerCallback, public ISessionObserver {
 public:
-    SessionManager(uv_loop_t* loop, std::size_t chunkSize,
+    SessionManager(uv_loop_t* loop, std::size_t chunkSize, std::size_t ringSlots,
                    SessionTimeouts timeouts = SessionTimeouts{});
     ~SessionManager() override;
 
@@ -32,6 +33,8 @@ public:
     SessionManager(SessionManager&&) = delete;
     SessionManager& operator=(SessionManager&&) = delete;
 
+    // 파서 스레드 기동 — 반드시 데몬화(fork) 이후에 호출 (design 10번 순서)
+    bool startParser(std::string& error);
     int listen(const std::string& ip, std::uint16_t port, int backlog);
     std::uint16_t boundPort() const { return _listener.boundPort(); }
     void close();
@@ -52,6 +55,7 @@ private:
     uv_loop_t* _loop = nullptr;
     common::net::Listener _listener;
     std::unique_ptr<Session> _session;
+    server::parser::ParserThread _parser;  // 상주 1개 — 세션마다 만들지 않는다
     std::unique_ptr<uv_idle_t> _reaper;  // 지연 파괴용 — 세션 콜백 밖에서 정리한다
     std::size_t _chunkSize;
     SessionTimeouts _timeouts;

@@ -43,13 +43,15 @@ std::string_view stateName(SessionState state) {
 }
 
 Session::Session(uv_loop_t* loop, std::unique_ptr<common::net::ISocket> socket,
-                 ISessionObserver* observer, std::size_t chunkSize, SessionTimeouts timeouts)
+                 ISessionObserver* observer, server::parser::ParserThread* parser,
+                 std::size_t chunkSize, SessionTimeouts timeouts)
     : _loop(loop),
       _socket(std::move(socket)),
       _observer(observer),
       _timer(loop),
       _timeouts(timeouts),
       _framer(proto::MessageType::UploadHeader),
+      _parser(parser),
       _readBuffer(chunkSize) {}
 
 Session::~Session() = default;
@@ -64,6 +66,9 @@ bool Session::start() {
         common::Logger::instance().error("Session: startRead failed: " + describe(rc));
         cleanup("startRead failed");
         return false;
+    }
+    if (_parser != nullptr) {
+        _parser->beginSession(kSkipReportPath, kResultCsvPath);
     }
     common::Logger::instance().info("Session started from " + _socket->peerAddress());
     armTimer();  // WAIT_HEADER — 상대가 헤더를 보낼 때까지 120초
@@ -106,6 +111,11 @@ void Session::transition(SessionState next) {
                                     " -> " + std::string{stateName(next)});
     _state = next;
     armTimer();
+    // 페이로드 구간을 벗어나면 링 상태와 무관하게 수신을 되살린다.
+    // (backpressure로 멈춘 채 VERIFYING 이후로 넘어가면 상대의 다음 메시지를 못 받는다)
+    if (next != SessionState::Receiving && next != SessionState::Cleanup) {
+        resumeReading();
+    }
 }
 
 void Session::onTimeout() {
@@ -114,14 +124,47 @@ void Session::onTimeout() {
 }
 
 common::net::WritableBuffer Session::onAllocate(std::size_t suggestedSize) {
-    // 다음 이슈에서 링버퍼 슬롯을 직접 내주도록 교체된다 (복사 0회).
-    // 지금은 세션 소유 고정 버퍼 — malloc은 어느 쪽이든 쓰지 않는다
+    _slotAcquired = false;
+    // 페이로드 구간에서는 링버퍼의 빈 슬롯을 그대로 수신 버퍼로 내준다 → 복사 0회.
+    // malloc 금지 규칙과 uv_alloc_cb 요구의 화해 지점 (design 추가 설계 2번)
+    if (_state == SessionState::Receiving && _receivedBytes < _fileSize && _parser != nullptr) {
+        char* data = nullptr;
+        std::size_t capacity = 0;
+        if (_parser->tryAcquireSlot(data, capacity)) {
+            _slotAcquired = true;
+            return common::net::WritableBuffer{data, capacity};
+        }
+    }
+    // 헤더·트레일러·DownloadDone은 링에 넣지 않는다 (파싱 대상이 아님)
     const std::size_t size = std::min(suggestedSize, _readBuffer.size());
     return common::net::WritableBuffer{_readBuffer.data(), size};
 }
 
 void Session::onRead(std::string_view data) {
     _timer.restart();  // 활동 감지 — 무활동 타이머 리셋 (②류 상태에서는 동작 중이 아니라 무시됨)
+
+    if (_slotAcquired) {
+        _slotAcquired = false;
+        // data는 링 슬롯 안을 가리킨다. 페이로드 몫만 커밋하고, 경계를 넘은 부분(트레일러)은
+        // ★ 커밋 전에 복사해 둔다 — 커밋 순간 슬롯 소유권이 파서로 넘어가기 때문
+        const std::uint64_t remaining = _fileSize - _receivedBytes;
+        const std::size_t take =
+            static_cast<std::size_t>(std::min<std::uint64_t>(remaining, data.size()));
+        const std::string tail{data.substr(take)};  // 최대 12B (트레일러) — 복사 비용 무시
+
+        _payloadCrc = common::crc32(_payloadCrc, data.substr(0, take));
+        _receivedBytes += take;
+        _parser->commitSlot(take);  // 소유권 이동 + 파서 깨우기
+        applyBackpressure();
+
+        if (tail.empty()) {
+            return;
+        }
+        data = std::string_view{tail};  // 남은 트레일러 바이트는 아래 일반 경로로
+        std::size_t consumed = consumeTrailer(data);
+        (void)consumed;
+        return;
+    }
 
     // 한 청크에 여러 단계의 바이트가 섞여 올 수 있다 (헤더+페이로드, 페이로드+트레일러).
     // 각 단계가 자기 몫만 소비하고 나머지를 다음 단계로 넘긴다
@@ -201,8 +244,24 @@ std::size_t Session::consumePayload(std::string_view data) {
     _payloadCrc = common::crc32(_payloadCrc, payload);
     _receivedBytes += take;
 
-    // 다음 이슈: 여기서 페이로드를 링버퍼 슬롯으로 커밋해 파서 스레드로 넘긴다.
-    // 현재는 CRC만 계산하고 흘려보내므로 통계는 비어 있다
+    // 여기 오는 경우는 헤더와 페이로드가 한 청크에 섞여 온 전이 청크뿐이다
+    // (그 외에는 onAllocate가 슬롯을 직접 내주므로 복사가 없다).
+    // 세션 버퍼에 담긴 바이트를 슬롯으로 옮긴다 — 세션당 최대 1회
+    std::size_t copied = 0;
+    while (copied < take) {
+        char* slot = nullptr;
+        std::size_t capacity = 0;
+        if (_parser == nullptr || !_parser->tryAcquireSlot(slot, capacity)) {
+            // 세션 시작 직후라 링은 비어 있어야 한다. 그래도 못 얻으면 데이터를 잃는 대신 끊는다
+            cleanup("ring slot unavailable for transition chunk");
+            return 0;
+        }
+        const std::size_t chunk = std::min(capacity, take - copied);
+        std::copy_n(payload.data() + copied, chunk, slot);
+        _parser->commitSlot(chunk);
+        copied += chunk;
+    }
+    applyBackpressure();
     return take;
 }
 
@@ -254,17 +313,25 @@ void Session::verifyAndAck() {
 
 void Session::analyzeAndSendResult() {
     transition(SessionState::Analyzing);
+    // 잔여 파싱·CSV 생성은 파서 스레드가 한다 — 통계가 파서 소유이므로 여기서 만들어야
+    // 소유권 공유·뮤텍스가 생기지 않는다 (design 11번 ANALYZING 실행 주체).
+    // 완료는 uv_async를 통해 onAnalysisComplete()로 돌아온다. 내부 유계 작업이라 타이머 없음
+    if (_parser == nullptr) {
+        cleanup("no parser thread");
+        return;
+    }
+    _parser->markUploadComplete();
+}
 
-    // 다음 이슈에서 파서 스레드의 통계로 교체된다. 지금은 빈 통계 — 프로토콜 왕복이
-    // 끝까지 도는지 먼저 검증하기 위한 중간 단계다 (CSV 스키마·전송 경로는 실제와 동일)
-    const server::stats::StatsCollector stats;
-    const server::parser::SkipReporter reporter;
-    _csv = server::csv::buildResultCsv(stats, reporter);
-    server::csv::writeCsvFile("./result.csv", _csv);  // 실패해도 전송은 계속한다
+void Session::onAnalysisComplete(server::parser::AnalysisResult result) {
+    if (_cleanupStarted || _state != SessionState::Analyzing) {
+        return;  // 이미 정리됐거나 이전 세션의 결과 — 무시
+    }
+    _csv = std::move(result.csv);  // 완성 버퍼 소유권이 루프로 이동했다
 
     proto::ResultHeader header;
     header.csvSize = _csv.size();
-    header.crc32 = common::crc32(0, _csv);  // 수 KB라 일괄 계산 — 블로킹 무시 가능
+    header.crc32 = result.crc32;  // 파서가 계산해 함께 넘긴 값
     const auto headerBytes = proto::encode(header);
 
     transition(SessionState::SendingResult);
@@ -276,6 +343,38 @@ void Session::analyzeAndSendResult() {
         cleanup("failed to send result.csv");
         return;
     }
+}
+
+void Session::applyBackpressure() {
+    if (_parser == nullptr) {
+        return;
+    }
+    if (_parser->ringFull() && _socket->isReading()) {
+        // 링이 꽉 찼다 → 수신 정지. 커널 버퍼가 차면 TCP 윈도우가 닫히고 송신 측이
+        // 자연 감속한다 — 이것이 50MB 메모리 상한을 지키는 장치다
+        _socket->stopRead();
+        _parser->setReadStopped(true);
+        // ★ 미스 웨이크업 방어: 파서가 ringFull() 확인과 setReadStopped(true) 사이에
+        //   링을 다 비웠다면, 그때는 _readStopped가 아직 false라 깨우기 신호를 보내지 않는다.
+        //   그대로 두면 아무도 재개시켜 주지 않아 전송이 멈춘다 — 여기서 직접 재확인한다
+        if (!_parser->ringFull()) {
+            resumeReading();
+        }
+    }
+}
+
+void Session::resumeReading() {
+    if (_cleanupStarted || _parser == nullptr || _socket == nullptr || _socket->isReading()) {
+        return;  // 재개는 멱등 — async 합쳐짐(coalescing)에 안전
+    }
+    // 링 여유를 따지는 것은 페이로드를 링에 넣는 RECEIVING 구간뿐이다.
+    // 그 밖의 상태(WAIT_DONE 등)는 링과 무관하므로 무조건 다시 읽어야 한다 —
+    // 안 그러면 backpressure로 멈춘 채 상태가 넘어갔을 때 DownloadDone을 영영 못 받는다
+    if (_state == SessionState::Receiving && _receivedBytes < _fileSize && _parser->ringFull()) {
+        return;
+    }
+    _parser->setReadStopped(false);
+    _socket->startRead();
 }
 
 std::size_t Session::consumeDone(std::string_view data) {
@@ -344,6 +443,11 @@ void Session::cleanup(const std::string& reason) {
     _finishReason = reason;
     _state = SessionState::Cleanup;
     _timer.stop();
+    if (_parser != nullptr) {
+        // 재조립 버퍼·통계는 파서 소유라 루프가 직접 못 지운다 — 중단 플래그로 파서가
+        // 스스로 링을 비우고 상태를 리셋하게 한다 (총괄표 "세션 중단 시" 칸)
+        _parser->abortSession();
+    }
     if (_socket) {
         _socket->close();  // 완료는 onClosed()에서 관찰자에게 알린다
     }

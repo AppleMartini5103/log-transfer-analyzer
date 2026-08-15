@@ -49,6 +49,10 @@ private:
     std::vector<char> _slot;
 };
 
+// 테스트용 소형 링 — 실제 기본값(64슬롯x64KB)보다 작게 잡아 backpressure를 쉽게 재현한다
+constexpr std::size_t kTestChunkSize = 16 * 1024;
+constexpr std::size_t kTestRingSlots = 8;
+
 template <typename Predicate>
 bool runUntil(uv_loop_t* loop, Predicate predicate, int maxIterations = 5000) {
     for (int i = 0; i < maxIterations; ++i) {
@@ -80,7 +84,9 @@ void drainLoop(uv_loop_t* loop) {
 struct Fixture {
     Fixture() {
         REQUIRE(uv_loop_init(&loop) == 0);
-        manager = std::make_unique<SessionManager>(&loop, 64 * 1024, timeouts);
+        manager = std::make_unique<SessionManager>(&loop, kTestChunkSize, kTestRingSlots, timeouts);
+        std::string error;
+        REQUIRE(manager->startParser(error));
         REQUIRE(manager->listen("127.0.0.1", 0, 128) == 0);
         port = manager->boundPort();
         REQUIRE(port != 0);
@@ -281,7 +287,10 @@ TEST_CASE("session: WAIT_HEADER timeout releases a ghost connection") {
     SessionTimeouts fast;
     fast.responseMs = 60;  // 테스트용 짧은 ②류 타임아웃
     fast.idleMs = 60;
-    fixture.manager = std::make_unique<SessionManager>(&fixture.loop, 64 * 1024, fast);
+    fixture.manager =
+        std::make_unique<SessionManager>(&fixture.loop, kTestChunkSize, kTestRingSlots, fast);
+    std::string parserError;
+    REQUIRE(fixture.manager->startParser(parserError));
     REQUIRE(fixture.manager->listen("127.0.0.1", 0, 128) == 0);
 
     TestClient client{&fixture.loop};
