@@ -23,7 +23,7 @@ std::string_view trim(std::string_view text) {
     return text;
 }
 
-// 숫자 파싱은 from_chars만 — 전체 소비 확인 포함 (컨벤션 2번, stoi/atoi 금지)
+// 숫자 파싱은 from_chars만 — 전체 소비 확인 포함 (컨벤션 2번, 레거시 변환 함수 금지)
 bool parseUnsigned(std::string_view token, std::uint64_t& out) {
     if (token.empty() || token.front() < '0' || token.front() > '9') {
         return false;

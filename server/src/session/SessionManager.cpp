@@ -13,8 +13,14 @@ SessionManager::SessionManager(uv_loop_t* loop, std::size_t chunkSize, std::size
       _chunkSize(chunkSize),
       _socketBufferSize(socketBufferSize),
       _timeouts(timeouts) {
-    uv_idle_init(loop, _reaper.get());
-    _reaper->data = this;
+    if (uv_idle_init(loop, _reaper.get()) != 0) {
+        // 유효한 루프에서는 사실상 실패하지 않지만, 규칙은 규칙이다 (컨벤션 3번).
+        // reaper 없이는 지연 파괴가 불가능하므로 이 상태를 로그로 드러낸다
+        common::Logger::instance().error("SessionManager: uv_idle_init failed — reaper disabled");
+        _reaper.reset();
+    } else {
+        _reaper->data = this;
+    }
     // 파서 → 루프 방향 신호를 현재 세션으로 라우팅한다. 파서는 상주이고 세션은 오가므로
     // 관리자가 중간에서 받아 넘긴다 (죽은 세션으로 콜백이 들어가지 않도록)
     _parser.setHandlers(
@@ -122,7 +128,11 @@ void SessionManager::onSessionFinished() {
     // idle 핸들로 한 틱 미룬다
     _sessionFinished = true;
     if (_reaper && !_closing) {
-        uv_idle_start(_reaper.get(), onReapCb);
+        const int rc = uv_idle_start(_reaper.get(), onReapCb);
+        if (rc != 0) {
+            common::Logger::instance().error(std::string{"SessionManager: uv_idle_start: "} +
+                                             uv_strerror(rc));
+        }
     }
 }
 

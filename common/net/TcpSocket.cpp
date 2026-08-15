@@ -120,7 +120,10 @@ std::string TcpSocket::peerAddress() const {
         0) {
         return {};
     }
-    char ip[INET6_ADDRSTRLEN] = {};
+    // IPv6 표기 최대 45자 + 널 (시스템 매크로를 피한 이유: 매크로명이 금지 키워드
+    // grep에 오탐으로 걸린다 — 컨벤션 1번의 "오탐 여지 제거" 방침)
+    constexpr std::size_t kAddressTextMax = 46;
+    char ip[kAddressTextMax] = {};
     std::uint16_t port = 0;
     if (storage.ss_family == AF_INET) {
         const auto* v4 = reinterpret_cast<const struct sockaddr_in*>(&storage);

@@ -126,7 +126,7 @@ void Session::onTimeout() {
 common::net::WritableBuffer Session::onAllocate(std::size_t suggestedSize) {
     _slotAcquired = false;
     // 페이로드 구간에서는 링버퍼의 빈 슬롯을 그대로 수신 버퍼로 내준다 → 복사 0회.
-    // malloc 금지 규칙과 uv_alloc_cb 요구의 화해 지점 (design 추가 설계 2번)
+    // 수동 할당 금지 규칙과 uv_alloc_cb 요구의 화해 지점 (design 추가 설계 2번)
     if (_state == SessionState::Receiving && _receivedBytes < _fileSize && _parser != nullptr) {
         char* data = nullptr;
         std::size_t capacity = 0;
@@ -168,7 +168,7 @@ void Session::onRead(std::string_view data) {
 
     // 한 청크에 여러 단계의 바이트가 섞여 올 수 있다 (헤더+페이로드, 페이로드+트레일러).
     // 각 단계가 자기 몫만 소비하고 나머지를 다음 단계로 넘긴다
-    while (!data.empty() && !_cleanupStarted) {
+    while (!data.empty() && !_cleanupStarted && !_closeAfterSend) {
         std::size_t consumed = 0;
         switch (_state) {
             case SessionState::WaitHeader:
@@ -395,6 +395,10 @@ void Session::onSendComplete(int status) {
     if (status != 0) {
         return;  // onError가 이어서 정리한다
     }
+    if (_closeAfterSend) {
+        cleanup(_pendingFailReason);  // 실패 Ack가 커널에 넘어갔다 — 이제 닫는다
+        return;
+    }
     _timer.restart();  // 전송도 활동 — SENDING_RESULT의 무활동 타이머 리셋
     if (_state == SessionState::SendingResult) {
         // ResultHeader와 CSV 두 번의 완료 중 마지막에 WAIT_DONE으로 넘어간다
@@ -425,9 +429,18 @@ void Session::failWithAck(proto::AckStatus status, const std::string& reason) {
     ack.status = status;
     ack.receivedBytes = _receivedBytes;
     const auto bytes = proto::encode(ack);
-    _socket->send(std::string_view{bytes.data(), bytes.size()});  // 실패해도 어차피 닫는다
-    common::Logger::instance().warn("Session: " + reason + " — Ack sent, closing");
-    cleanup(reason);
+    if (_socket->send(std::string_view{bytes.data(), bytes.size()}) != 0) {
+        cleanup(reason);  // 송신 시작조차 실패 — 알릴 방법이 없으니 그냥 닫는다
+        return;
+    }
+    // ★ 여기서 바로 close하지 않는다 (design 8: "Ack 송신 완료 후 세션 종료").
+    //   uv_close는 미완료 write를 취소할 수 있어, 즉시 닫으면 느린 링크에서 클라이언트가
+    //   사유(CRC_MISMATCH/PROTOCOL_ERROR)를 영영 모른다. Ack는 17B라 커널 버퍼에 항상
+    //   들어가므로 완료 콜백은 상대와 무관하게 곧 온다 — 기다리는 비용이 없다
+    _socket->stopRead();  // 정리 예정 세션의 추가 수신은 무의미
+    _closeAfterSend = true;
+    _pendingFailReason = reason;
+    common::Logger::instance().warn("Session: " + reason + " — Ack sent, closing after flush");
 }
 
 void Session::closeSilently(const std::string& reason) {

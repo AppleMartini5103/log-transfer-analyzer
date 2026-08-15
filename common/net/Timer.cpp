@@ -39,9 +39,7 @@ void Timer::restart() {
     if (!_handle || !isActive()) {
         return;  // 멈춘 타이머를 활동만으로 되살리지 않는다 — 상태 전이가 명시적으로 걸어야 함
     }
-    uv_timer_again(_handle.get());
-    // uv_timer_again은 repeat 값으로 재시작하므로, repeat=0인 우리 타이머에는
-    // 직접 다시 start를 걸어야 한다
+    // repeat=0(1회성)이므로 uv_timer_again은 쓸 수 없다 — 같은 간격으로 다시 start
     uv_timer_start(_handle.get(), onTimeoutCb, _timeoutMs, 0);
 }
 

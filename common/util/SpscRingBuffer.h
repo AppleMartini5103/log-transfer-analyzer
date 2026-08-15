@@ -4,13 +4,13 @@
 #include <cstdint>
 #include <vector>
 
-// bounded lock-free SPSC 링버퍼 (design "공통 골격" — 클라/서버 동일 자료구조).
+// bounded 락프리 SPSC 링버퍼 (design "공통 골격" — 클라/서버 동일 자료구조).
 //
 // 소유권 모델: 슬롯은 producer → consumer 로 단방향 이동 (뮤텍스·참조 카운트 없음).
 //   producer(1스레드):  tryAcquire() → 슬롯 버퍼에 직접 기록 → commit(실제 크기)
 //   consumer(1스레드):  tryPeek() → 처리 → release()
 // tryAcquire가 내주는 생포인터를 uv_alloc_cb에 그대로 물리면 수신 = 복사 0회
-// (malloc 금지 규칙과 libuv alloc 요구의 화해 지점 — design 추가 설계 2번).
+// (수동 할당 금지 규칙과 libuv alloc 요구의 화해 지점 — design 추가 설계 2번).
 //
 // 계약 (어기면 버그 — SPSC이므로 검사 비용을 넣지 않는다):
 //   - producer 연산(tryAcquire/commit/full)과 consumer 연산(tryPeek/release/empty)은

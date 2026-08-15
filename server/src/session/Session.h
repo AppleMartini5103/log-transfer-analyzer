@@ -141,6 +141,11 @@ private:
 
     std::string _csv;  // 메모리 완성본 — 전송·CRC·디스크 기록의 공통 소스
     std::string _finishReason;
+    // 실패 Ack의 송신 완료를 기다리는 중 (design 8: "Ack 송신 완료 후 세션 종료").
+    // send 직후 close하면 uv_close가 미완료 write를 취소할 수 있어 느린 링크에서
+    // 사유가 유실된다 — onSendComplete에서 cleanup으로 이어진다
+    bool _closeAfterSend = false;
+    std::string _pendingFailReason;
     bool _cleanupStarted = false;
     bool _finished = false;
 };

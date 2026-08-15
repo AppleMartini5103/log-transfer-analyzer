@@ -14,7 +14,7 @@
 namespace common::net {
 
 // uv_alloc_cb에 내줄 수신 버퍼. 링버퍼 슬롯을 그대로 물리면 수신이 복사 0회가 된다
-// (malloc 금지 규칙과 libuv alloc 요구의 화해 지점 — design 추가 설계 2번)
+// (수동 할당 금지 규칙과 libuv alloc 요구의 화해 지점 — design 추가 설계 2번)
 struct WritableBuffer {
     char* data = nullptr;  // 소유하지 않는 관찰자 — 수명은 버퍼 제공자가 보유
     std::size_t size = 0;
@@ -28,7 +28,7 @@ public:
     virtual ~ISocketCallback() = default;
 
     // 수신 버퍼 대여. 빈 버퍼를 반환하면 libuv가 UV_ENOBUFS를 돌려주고 onError로 이어진다
-    // → 읽기를 시작하려면 반드시 오버라이드할 것 (조용히 malloc하지 않는다)
+    // → 읽기를 시작하려면 반드시 오버라이드할 것 (조용히 힙 할당으로 도망가지 않는다)
     virtual WritableBuffer onAllocate(std::size_t /*suggestedSize*/) { return {}; }
 
     // data는 onAllocate가 내준 버퍼의 앞부분 — 콜백이 끝나면 유효성 보장 없음

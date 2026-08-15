@@ -242,8 +242,9 @@ the queue alone would be defeated by any unbounded buffer downstream.
 **Zero-copy receive.** libuv asks the application for a buffer before every read. Instead of
 allocating one, the session hands back an empty ring slot, so bytes land directly in the queue the
 parser will read — there is no copy between the socket and the parser, and no allocation on the
-data path at all. The only copy is the ≤12-byte trailer when it shares a chunk boundary with the
-payload.
+data path at all. Two small exceptions exist, both bounded: the chunk that carries the upload
+header may also carry the first payload bytes, which are copied into a ring slot once per session,
+and the ≤12-byte trailer tail is copied out before the slot ownership transfers.
 
 **Backpressure is the ceiling mechanism.** When the ring fills, the server stops reading; the
 kernel receive buffer fills, the TCP window closes, and the sender throttles itself. When the
