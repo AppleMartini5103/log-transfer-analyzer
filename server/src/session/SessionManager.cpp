@@ -5,12 +5,13 @@
 namespace server::session {
 
 SessionManager::SessionManager(uv_loop_t* loop, std::size_t chunkSize, std::size_t ringSlots,
-                               SessionTimeouts timeouts)
+                               int socketBufferSize, SessionTimeouts timeouts)
     : _loop(loop),
       _listener(loop),
       _parser(loop, ringSlots, chunkSize),
       _reaper(std::make_unique<uv_idle_t>()),
       _chunkSize(chunkSize),
+      _socketBufferSize(socketBufferSize),
       _timeouts(timeouts) {
     uv_idle_init(loop, _reaper.get());
     _reaper->data = this;
@@ -96,6 +97,15 @@ void SessionManager::acceptIfIdle() {
         return;  // 대기분 없음 — 다음 onConnection을 기다린다
     }
     _pendingConnection = false;
+    if (_socketBufferSize > 0) {
+        // 벤치 스윕용 고정값. 리눅스는 요청값의 2배로 보고하고 wmem_max/rmem_max에서
+        // 잘리므로 실제 적용값을 로그에 남긴다 (design 네트워크 버퍼 절의 검증 절차)
+        socket->applyBufferSizes(_socketBufferSize, _socketBufferSize);
+        common::Logger::instance().info(
+            "Socket buffers requested " + std::to_string(_socketBufferSize) + " B, actual snd=" +
+            std::to_string(socket->actualSendBufferSize()) + " rcv=" +
+            std::to_string(socket->actualRecvBufferSize()));
+    }
     _session =
         std::make_unique<Session>(_loop, std::move(socket), this, &_parser, _chunkSize, _timeouts);
     if (!_session->start()) {

@@ -138,6 +138,46 @@ std::string TcpSocket::peerAddress() const {
     return std::string{ip} + ":" + std::to_string(port);
 }
 
+int TcpSocket::applyBufferSizes(int sendSize, int recvSize) {
+    if (!_handle) {
+        return UV_EINVAL;
+    }
+    auto* handle = reinterpret_cast<uv_handle_t*>(_handle.get());
+    if (sendSize > 0) {
+        int value = sendSize;
+        const int rc = uv_send_buffer_size(handle, &value);  // value > 0 → 설정
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    if (recvSize > 0) {
+        int value = recvSize;
+        const int rc = uv_recv_buffer_size(handle, &value);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+int TcpSocket::actualSendBufferSize() const {
+    if (!_handle) {
+        return 0;
+    }
+    int value = 0;  // value == 0 → 조회 (실제 적용값)
+    auto* handle = const_cast<uv_handle_t*>(reinterpret_cast<const uv_handle_t*>(_handle.get()));
+    return uv_send_buffer_size(handle, &value) == 0 ? value : 0;
+}
+
+int TcpSocket::actualRecvBufferSize() const {
+    if (!_handle) {
+        return 0;
+    }
+    int value = 0;
+    auto* handle = const_cast<uv_handle_t*>(reinterpret_cast<const uv_handle_t*>(_handle.get()));
+    return uv_recv_buffer_size(handle, &value) == 0 ? value : 0;
+}
+
 void TcpSocket::onAllocCb(uv_handle_t* handle, std::size_t suggested, uv_buf_t* buf) {
     auto* self = static_cast<TcpSocket*>(handle->data);
     if (self == nullptr || self->_callback == nullptr) {

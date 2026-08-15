@@ -70,8 +70,9 @@ bool ServerApp::init(std::string& error) {
     }
 
     // 1:1 세션 관리자 — 리스닝 시작 (design 11번)
-    _sessions = std::make_unique<session::SessionManager>(&_loop, _config.chunkSize,
-                                                         common::kDefaultSlotCount);
+    _sessions = std::make_unique<session::SessionManager>(
+        &_loop, _config.chunkSize, common::ringSlotCountFor(_config.chunkSize),
+        static_cast<int>(_config.sendBufferSize));
     if (!_sessions->startParser(error)) {
         return false;  // 파서 스레드 기동 실패 — 데몬화 이후이므로 fork 함정은 없다
     }

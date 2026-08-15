@@ -84,7 +84,8 @@ void drainLoop(uv_loop_t* loop) {
 struct Fixture {
     Fixture() {
         REQUIRE(uv_loop_init(&loop) == 0);
-        manager = std::make_unique<SessionManager>(&loop, kTestChunkSize, kTestRingSlots, timeouts);
+        manager = std::make_unique<SessionManager>(&loop, kTestChunkSize, kTestRingSlots, 0,
+                                                  timeouts);
         std::string error;
         REQUIRE(manager->startParser(error));
         REQUIRE(manager->listen("127.0.0.1", 0, 128) == 0);
@@ -288,7 +289,7 @@ TEST_CASE("session: WAIT_HEADER timeout releases a ghost connection") {
     fast.responseMs = 60;  // 테스트용 짧은 ②류 타임아웃
     fast.idleMs = 60;
     fixture.manager =
-        std::make_unique<SessionManager>(&fixture.loop, kTestChunkSize, kTestRingSlots, fast);
+        std::make_unique<SessionManager>(&fixture.loop, kTestChunkSize, kTestRingSlots, 0, fast);
     std::string parserError;
     REQUIRE(fixture.manager->startParser(parserError));
     REQUIRE(fixture.manager->listen("127.0.0.1", 0, 128) == 0);

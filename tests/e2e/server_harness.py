@@ -23,6 +23,8 @@ def find_free_port():
 class ServerProcess:
     """포그라운드로 띄우고 SIGTERM으로 내린다 (데몬 모드는 별도 시나리오에서 검증)."""
 
+    CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+
     def __init__(self, binary, daemon=False, extra_args=()):
         self.binary = os.path.abspath(binary)
         self.daemon = daemon
@@ -31,13 +33,19 @@ class ServerProcess:
         self.workdir = tempfile.mkdtemp(prefix="byda-e2e-")
         self.process = None
         self._peak_rss_kb = 0
+        self._stdout_file = None
+        self._stdout_path = None
 
     def start(self, wait_timeout=5.0):
         args = [self.binary, "-p", str(self.port)] + self.extra_args
         if self.daemon:
             args.append("-d")
+        # 포그라운드 모드는 로그가 stdout으로 나간다 — 파일로 받아둬야 실패 원인을 볼 수 있고
+        # 소켓 버퍼 실제 적용값 같은 진단 로그도 읽을 수 있다 (데몬 모드는 server.log를 쓴다)
+        self._stdout_path = os.path.join(self.workdir, "stdout.log")
+        self._stdout_file = open(self._stdout_path, "wb")
         self.process = subprocess.Popen(
-            args, cwd=self.workdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            args, cwd=self.workdir, stdout=self._stdout_file, stderr=subprocess.STDOUT
         )
         if self.daemon:
             self.process.wait(timeout=wait_timeout)  # 부모는 즉시 반환한다
@@ -72,6 +80,16 @@ class ServerProcess:
             pass
         return self._peak_rss_kb
 
+    def cpu_seconds(self):
+        """프로세스가 지금까지 쓴 CPU 시간 (utime+stime). 청크 스윕의 핵심 지표."""
+        try:
+            with open(f"/proc/{self.pid}/stat") as handle:
+                fields = handle.read().rsplit(") ", 1)[1].split()
+            # /proc(5): 닫는 괄호 뒤 3번째가 utime(14), 4번째가 stime(15)
+            return (int(fields[11]) + int(fields[12])) / self.CLOCK_TICKS
+        except (OSError, ValueError, IndexError, FileNotFoundError):
+            return 0.0
+
     def is_alive(self):
         if self.daemon:
             try:
@@ -93,7 +111,10 @@ class ServerProcess:
             return handle.read()
 
     def log_text(self):
+        """데몬이면 server.log, 포그라운드면 캡처한 stdout."""
         data = self.read_artifact("server.log")
+        if data is None:
+            data = self.read_artifact("stdout.log")
         return data.decode("utf-8", "replace") if data else ""
 
     def stop(self, timeout=5.0):
@@ -119,6 +140,9 @@ class ServerProcess:
 
     def cleanup(self):
         self.stop()
+        if self._stdout_file is not None:
+            self._stdout_file.close()
+            self._stdout_file = None
         shutil.rmtree(self.workdir, ignore_errors=True)
 
     def __enter__(self):

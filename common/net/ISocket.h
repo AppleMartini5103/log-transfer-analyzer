@@ -66,6 +66,15 @@ public:
 
     // "127.0.0.1:54321" 형식. 실패 시 빈 문자열 — 로그 표시 전용
     virtual std::string peerAddress() const = 0;
+
+    // SO_SNDBUF / SO_RCVBUF 설정. 0이면 건드리지 않는다(커널 autotuning 유지).
+    // ★ 설정 후 반드시 actual*BufferSize()로 실제 적용값을 확인할 것:
+    //   리눅스는 요청값을 2배로 잡고 2배로 보고하며, net.core.wmem_max/rmem_max에서
+    //   조용히 잘린다. 수동 설정은 그 소켓의 autotuning도 끈다 (tcp(7)) —
+    //   벤치마크에는 변수 고정이라 유리하지만 실제 운영은 커널에 맡기는 편이 낫다
+    virtual int applyBufferSizes(int sendSize, int recvSize) = 0;
+    virtual int actualSendBufferSize() const = 0;
+    virtual int actualRecvBufferSize() const = 0;
 };
 
 }  // namespace common::net

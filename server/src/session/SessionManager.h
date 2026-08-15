@@ -24,8 +24,9 @@ namespace server::session {
 
 class SessionManager : public common::net::IListenerCallback, public ISessionObserver {
 public:
+    // socketBufferSize = 0이면 SO_SNDBUF/SO_RCVBUF를 건드리지 않는다 (커널 autotuning)
     SessionManager(uv_loop_t* loop, std::size_t chunkSize, std::size_t ringSlots,
-                   SessionTimeouts timeouts = SessionTimeouts{});
+                   int socketBufferSize = 0, SessionTimeouts timeouts = SessionTimeouts{});
     ~SessionManager() override;
 
     SessionManager(const SessionManager&) = delete;
@@ -58,6 +59,7 @@ private:
     server::parser::ParserThread _parser;  // 상주 1개 — 세션마다 만들지 않는다
     std::unique_ptr<uv_idle_t> _reaper;  // 지연 파괴용 — 세션 콜백 밖에서 정리한다
     std::size_t _chunkSize;
+    int _socketBufferSize = 0;
     SessionTimeouts _timeouts;
     std::uint64_t _completedSessions = 0;
     bool _pendingConnection = false;  // 세션 중에 온 연결 — CLEANUP 후 받는다

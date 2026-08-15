@@ -37,6 +37,31 @@ bool pop(SpscRingBuffer& ring, std::string& out) {
 
 }  // namespace
 
+TEST_CASE("ring: slot count keeps the ring inside its memory budget") {
+    using common::kDefaultSlotCount;
+    using common::kMinSlotCount;
+    using common::kRingBudgetBytes;
+    using common::ringSlotCountFor;
+
+    // 기본 청크(64KB)에서는 설계값 64슬롯이 그대로 나온다
+    REQUIRE(ringSlotCountFor(64 * 1024) == kDefaultSlotCount);
+    REQUIRE(ringSlotCountFor(64 * 1024) * 64 * 1024 == kRingBudgetBytes);
+
+    // 청크를 키우면 슬롯 수가 줄어 예산을 넘지 않는다 (1MB x 64 = 64MB 사고 방지)
+    for (const std::size_t slotSize :
+         {32u * 1024, 64u * 1024, 128u * 1024, 256u * 1024, 1024u * 1024}) {
+        const std::size_t slots = ringSlotCountFor(slotSize);
+        INFO("slot size " << slotSize << " -> " << slots << " slots");
+        REQUIRE(slots >= kMinSlotCount);
+        REQUIRE(slots <= kDefaultSlotCount);
+        REQUIRE(slots * slotSize <= kRingBudgetBytes);
+    }
+    REQUIRE(ringSlotCountFor(1024 * 1024) == 4);
+
+    // 예산보다 큰 슬롯이라도 최소 개수는 보장한다 (완충 지대가 없으면 처리량이 죽는다)
+    REQUIRE(ringSlotCountFor(8 * 1024 * 1024) == kMinSlotCount);
+}
+
 TEST_CASE("ring: acquire-commit-peek-release round trip") {
     SpscRingBuffer ring{4, 64};
     REQUIRE(ring.empty());

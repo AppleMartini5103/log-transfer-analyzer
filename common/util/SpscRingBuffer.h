@@ -28,6 +28,17 @@ namespace common {
 inline constexpr std::size_t kDefaultSlotCount = 64;
 inline constexpr std::size_t kDefaultSlotSize = 64 * 1024;
 
+// 링 전체가 쓸 메모리 예산 (design 메모리 예산표의 "링버퍼 4MB").
+// ★ 슬롯 수를 64로 고정하면 chunk_size를 키울 때 링이 예산을 뚫는다:
+//   2026-08-16 벤치 스윕에서 chunk_size=1MB × 64슬롯 = 64MB가 되어 peak RSS 69.4MB로
+//   과제의 50MB 제약을 위반했다. 처리량은 32KB~1MB에서 평평했으므로 큰 청크는
+//   이득 없이 메모리만 먹는다 — 예산을 고정하고 슬롯 수를 줄이는 쪽이 옳다
+inline constexpr std::size_t kRingBudgetBytes = 4 * 1024 * 1024;
+inline constexpr std::size_t kMinSlotCount = 4;  // 완충 지대로서 최소한의 여유
+
+// 슬롯 크기에 맞춰 예산 안에 들어가는 슬롯 수를 계산한다
+std::size_t ringSlotCountFor(std::size_t slotSize);
+
 class SpscRingBuffer {
 public:
     struct WriteSlot {

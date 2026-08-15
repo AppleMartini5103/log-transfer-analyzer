@@ -1,6 +1,19 @@
 #include "util/SpscRingBuffer.h"
 
+#include <algorithm>
+
 namespace common {
+
+std::size_t ringSlotCountFor(std::size_t slotSize) {
+    if (slotSize == 0) {
+        return kDefaultSlotCount;
+    }
+    const std::size_t withinBudget = kRingBudgetBytes / slotSize;
+    if (withinBudget < kMinSlotCount) {
+        return kMinSlotCount;  // 예산보다 슬롯이 크면 최소 개수는 보장한다
+    }
+    return withinBudget < kDefaultSlotCount ? withinBudget : kDefaultSlotCount;
+}
 
 SpscRingBuffer::SpscRingBuffer(std::size_t slotCount, std::size_t slotSize)
     : _slotCount(slotCount),

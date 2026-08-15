@@ -41,6 +41,9 @@ public:
     void close() override;
     bool isClosing() const override { return _closing; }
     std::string peerAddress() const override;
+    int applyBufferSizes(int sendSize, int recvSize) override;
+    int actualSendBufferSize() const override;
+    int actualRecvBufferSize() const override;
 
     // Listener가 uv_accept 대상으로 쓰는 원시 핸들 (내부용)
     uv_stream_t* stream() { return reinterpret_cast<uv_stream_t*>(_handle.get()); }
