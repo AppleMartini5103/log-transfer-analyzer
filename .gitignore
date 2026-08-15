@@ -83,3 +83,7 @@ server.conf
 3rdparty/libuv/lib/
 3rdparty/catch2/include/
 3rdparty/catch2/lib/
+
+# Python bytecode (E2E test driver)
+__pycache__/
+*.py[cod]

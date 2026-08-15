@@ -15,8 +15,11 @@ ParserThread::ParserThread(uv_loop_t* loop, std::size_t slotCount, std::size_t s
       _ring(slotCount, slotSize) {}
 
 ParserThread::~ParserThread() {
-    stop();
-    // async 핸들은 close 콜백까지 살아 있어야 한다 — 소유권을 콜백으로 넘긴다
+    stop();  // 이미 닫혔으면 아무 일도 하지 않는다
+}
+
+void ParserThread::closeHandles() {
+    // async 핸들은 close 콜백까지 살아 있어야 하므로 소유권을 콜백으로 넘긴다
     const auto closeAsync = [](std::unique_ptr<uv_async_t>& handle) {
         if (!handle) {
             return;
@@ -58,6 +61,7 @@ bool ParserThread::start(std::string& error) {
 
 void ParserThread::stop() {
     if (!_started) {
+        closeHandles();  // start 전에 닫는 경우도 있다 (init 실패 등)
         return;
     }
     {
@@ -69,6 +73,9 @@ void ParserThread::stop() {
         _thread.join();
     }
     _started = false;
+    // 스레드가 멈춘 뒤에 핸들을 닫는다 — 파서가 살아 있는 동안 닫으면
+    // uv_async_send가 해제된 핸들을 건드릴 수 있다
+    closeHandles();
 }
 
 void ParserThread::setHandlers(CompletionHandler onComplete, ResumeHandler onResume) {

@@ -57,7 +57,10 @@ public:
     ParserThread& operator=(ParserThread&&) = delete;
 
     bool start(std::string& error);
-    void stop();  // 종료 플래그 + notify + join. 여러 번 불러도 안전
+    // 종료 플래그 + notify + join, 그리고 uv 핸들 close까지.
+    // ★ 반드시 uv_run이 반환하기 전에(=루프 스레드에서) 불러야 한다 — async 핸들이
+    //   열려 있으면 활성 핸들로 남아 uv_run이 영원히 반환하지 않는다. 여러 번 불러도 안전
+    void stop();
 
     void setHandlers(CompletionHandler onComplete, ResumeHandler onResume);
 
@@ -74,6 +77,7 @@ public:
 
 private:
     void run();
+    void closeHandles();
     void consumeReadySlots();
     void finishSession();
     void resetSessionState();

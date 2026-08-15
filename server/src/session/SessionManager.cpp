@@ -52,10 +52,23 @@ int SessionManager::listen(const std::string& ip, std::uint16_t port, int backlo
 
 void SessionManager::close() {
     _closing = true;
-    _parser.stop();  // 종료 플래그 + notify → join (초기화의 역순)
     _listener.close();  // 새 연결 차단이 종료 시퀀스의 첫 단계 (design 10번)
     if (_session) {
-        _session.reset();  // 활성 세션은 소멸자에서 소켓을 닫는다 (RAII)
+        _session.reset();  // 활성 세션은 소켓을 닫는다 (RAII)
+    }
+    _parser.stop();  // 종료 플래그 + notify → join → async 핸들 close
+
+    // ★ idle 핸들도 여기서 닫아야 한다. 소멸자는 uv_run이 반환한 뒤에 실행되는데,
+    //   열린 핸들이 하나라도 남아 있으면 uv_run이 반환하지 않아 서로를 기다리게 된다
+    if (_reaper) {
+        uv_idle_stop(_reaper.get());
+        _reaper->data = nullptr;
+        uv_handle_t* raw = reinterpret_cast<uv_handle_t*>(_reaper.release());
+        if (!uv_is_closing(raw)) {
+            uv_close(raw, [](uv_handle_t* handle) {
+                std::unique_ptr<uv_idle_t> owned{reinterpret_cast<uv_idle_t*>(handle)};
+            });
+        }
     }
 }
 
