@@ -5,6 +5,7 @@ add_executable(unit_tests
     test_protocol.cpp
     test_crc32.cpp
     test_codec.cpp
+    test_framer.cpp
 )
 
 target_include_directories(unit_tests PRIVATE ${THIRDPARTY_DIR}/catch2/include)
