@@ -32,7 +32,7 @@ echo   cl.exe found.
 where tar >nul 2>nul
 if errorlevel 1 (
     echo.
-    echo [ERROR] tar.exe not found! (included in Windows 10 1803+)
+    echo [ERROR] tar.exe not found! ^(included in Windows 10 1803+^)
     echo.
     exit /b 1
 )
