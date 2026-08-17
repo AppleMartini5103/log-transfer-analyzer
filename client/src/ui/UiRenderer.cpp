@@ -190,6 +190,19 @@ void UiRenderer::renderTransferRow(UiState& state, const UiCallbacks& callbacks)
 
     ImGui::Spacing();
     ImGui::TextDisabled("State: %s", sessionLabel(state.session));
+
+    // 세션이 끝난 뒤 Save가 왜 아직 열려 있는지 화면이 스스로 설명한다.
+    //
+    // 왜 필요한가: 서버는 1:1 정책상 DownloadDone을 받는 즉시 연결을 닫는다(design 11번의
+    // WAIT_DONE → CLEANUP — CLEANUP이 다음 연결을 받는 유일한 지점이라 닫지 않을 수 없다).
+    // 그래서 완료 직후 인디케이터는 Disconnected가 되고, 화면에는 "끊겼는데 Save만 활성"인
+    // 조합이 남는다. 동작은 옳지만(CSV는 이미 메모리에 있고 저장은 순수 로컬 작업) 이유를
+    // 적어두지 않으면 사용자가 그 조합을 모순으로 읽는다 — design 12번의 "화면은 언제나 한
+    // 가지 이야기만 한다" 원칙은 상태를 줄이는 것뿐 아니라 설명하는 것으로도 지켜진다.
+    if (state.canSaveResult()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("- result.csv received; Save needs no connection");
+    }
 }
 
 void UiRenderer::renderLogPanel(UiState& state) {

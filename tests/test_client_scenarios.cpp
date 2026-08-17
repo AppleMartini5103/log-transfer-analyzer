@@ -130,7 +130,18 @@ public:
             return;
         }
 
-        if (_responded || received.size() < totalUploadBytes()) {
+        if (_responded) {
+            // 응답을 이미 보냈다 — 이제 남은 것은 클라이언트의 DownloadDone뿐이다.
+            // 그걸 받으면 닫는다: 실제 서버가 1:1 정책상 하는 일과 같다
+            // (design 11번 WAIT_DONE → CLEANUP — CLEANUP이 accept를 재개하는 유일한 지점이라
+            //  닫지 않을 수 없다). 이 동작을 흉내내지 않으면 "완료 직후 서버가 끊는다"를
+            //  전제로 한 클라이언트 경로(EOF Info 분류, Save 게이팅)를 검증할 수 없다.
+            if (received.size() >= totalUploadBytes() + proto::kDownloadDoneSize) {
+                closeAccepted();
+            }
+            return;
+        }
+        if (received.size() < totalUploadBytes()) {
             return;  // 아직 업로드가 다 도착하지 않았다
         }
         _responded = true;
@@ -543,6 +554,37 @@ TEST_CASE("client scenario: the service is reusable after a forced disconnect") 
     REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }, 60000));
     REQUIRE(harness.service.takeResultCsv() == harness.server->csv);
     REQUIRE(harness.server->connections == 2);  // 두 번째 연결이 실제로 수락됐다
+}
+
+TEST_CASE("client scenario: the result stays saveable after the server closes") {
+    // 정상 완주 직후 서버는 1:1 정책상 곧바로 연결을 닫는다(design 11번: CLEANUP이 accept를
+    // 재개하는 유일한 지점). 그래서 화면에는 "링크는 Disconnected인데 Save만 활성"인 조합이
+    // 남는다. 이 조합이 의도된 것임을 여기서 고정한다.
+    //
+    // 왜 테스트로 묶는가: Save를 링크 상태에 묶으면 서버가 같은 순간에 닫으므로 사람이 그보다
+    // 빨리 누를 수 없어 Save가 사실상 못 쓰는 버튼이 된다. 즉 이건 취향이 아니라 프로토콜이
+    // 강제하는 요구사항이고, 무심코 canSaveResult()에 링크 조건을 더하면 조용히 깨진다.
+    Harness harness;
+    harness.server->policy = FakeServer::OnUploadComplete::FullResult;
+
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }, 60000));
+
+    // 서버가 닫는 것을 기다린다 — 완료 직후이므로 EOF는 Info로 분류돼야 한다 (design 12번)
+    REQUIRE(harness.waitFor([&] { return harness.link == LinkState::Disconnected; }));
+    INFO("logs:" << harness.allLogs());
+    REQUIRE(harness.sawLog("Server closed the connection."));
+
+    client::UiState ui;
+    ui.link = harness.link;
+    ui.session = harness.session;
+
+    REQUIRE(ui.canSaveResult());                        // ★ 끊긴 뒤에도 저장할 수 있어야 한다
+    REQUIRE(harness.service.takeResultCsv() == harness.server->csv);  // 내용도 온전하다
+    REQUIRE(ui.canConnect());                           // 다시 붙는 것도 열려 있다
+    REQUIRE_FALSE(ui.canSend());                        // 연결이 없으니 Send는 잠긴다
+    REQUIRE_FALSE(ui.canDisconnect());
 }
 
 TEST_CASE("client scenario: quitting mid-upload joins every thread cleanly") {
