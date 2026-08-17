@@ -49,10 +49,10 @@ if(NOT WIN32)
     add_subdirectory(server)
 endif()
 
-# client/ is Windows-only (DearImGui + Win32); added when client work starts.
-# if(WIN32)
-#     add_subdirectory(client)
-# endif()
+# client/ is Windows-only (DearImGui + Win32/DX11).
+if(WIN32)
+    add_subdirectory(client)
+endif()
 
 enable_testing()
 add_subdirectory(tests)

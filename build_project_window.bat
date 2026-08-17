@@ -31,7 +31,7 @@ if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
 )
 
 echo [1/3] Checking 3rdparty libraries...
-for %%L in (libuv catch2) do (
+for %%L in (libuv catch2 imgui) do (
     if not exist "3rdparty\%%L\include" (
         echo   3rdparty\%%L not built yet — running its build script...
         pushd 3rdparty\%%L
