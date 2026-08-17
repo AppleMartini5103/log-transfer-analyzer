@@ -12,7 +12,12 @@ public:
     explicit SocketCallback(TransferService& service) : _service(service) {}
 
     void onConnect(int status) override {
+        if (_service._connectTimer) {
+            _service._connectTimer->stop();
+        }
         if (status < 0) {
+            _service._pendingUpload.reset();  // 재연결 실패 — 보류한 업로드도 버린다
+            _service._reconnecting = false;
             // 실패 사유를 그대로 보여준다 — "연결 안 됨"만으로는 방화벽인지 서버가 죽은
             // 것인지 알 수 없다 (그 구분이 Ping 버튼의 존재 이유이기도 하다).
             _service.pushLog(common::LogLevel::Error,
@@ -29,8 +34,16 @@ public:
         if (result < 0) {
             _service.pushLog(common::LogLevel::Error,
                              std::string("startRead failed: ") + ::uv_strerror(result));
+            _service._pendingUpload.reset();
+            _service._reconnecting = false;
             _service.closeSocket();
+            return;
         }
+
+        // 재연결이었다면 보류한 업로드를 이어서 실행한다 — 사용자가 Send를 두 번 누르게
+        // 하지 않는다 (design 12번: 복구는 안전한 시점에 자동으로, 단 내레이션과 함께).
+        _service._reconnecting = false;
+        _service.resumePendingUpload();
     }
 
     common::net::WritableBuffer onAllocate(std::size_t suggestedSize) override {
@@ -59,12 +72,22 @@ public:
     void onRead(std::string_view data) override { _service.onBytes(data); }
 
     void onError(int status, std::string_view where) override {
-        // 서버의 정상 종료(EOF)와 예기치 않은 단절을 구분해 표기한다 (design 12번:
-        // 정상 종료는 Info, 그 외는 Warn/Error). 업로드 중이라면 어느 쪽이든 실패다.
-        const bool eof = (status == UV_EOF);
-        const auto level = eof ? common::LogLevel::Info : common::LogLevel::Error;
-        _service.pushLog(level, eof ? "Server closed the connection."
-                                    : std::string(where) + ": " + ::uv_strerror(status));
+        // EOF는 세 가지 의미가 될 수 있어 구분해 표기한다 (design 12번):
+        //  ① 세션 완료 후    → 프로토콜의 정상 종료 (Info)
+        //  ② 전송 전 유휴    → 서버의 WAIT_HEADER 타임아웃 정리 (Warn — 사용자 잘못은 아니지만
+        //                       다음 Send가 재연결로 이어진다는 점을 알려야 한다)
+        //  ③ 업로드 중       → 실패 (아래 abortUpload가 Error로 남긴다)
+        if (status == UV_EOF) {
+            if (_service._sessionCompleted) {
+                _service.pushLog(common::LogLevel::Info, "Server closed the connection.");
+            } else {
+                _service.pushLog(common::LogLevel::Warn,
+                                 "Server closed the connection (idle timeout).");
+            }
+        } else {
+            _service.pushLog(common::LogLevel::Error,
+                             std::string(where) + ": " + ::uv_strerror(status));
+        }
 
         if (_service._uploading) {
             _service.abortUpload("Upload aborted: the connection was lost.",
@@ -195,24 +218,72 @@ void TransferService::handle(const ConnectCommand& command) {
         pushLog(common::LogLevel::Warn, "Already connected or connecting - ignoring Connect.");
         return;
     }
+    if (beginConnect(command.ip, command.port)) {
+        pushLog(common::LogLevel::Info,
+                "Connecting to " + command.ip + ":" + std::to_string(command.port) + "...");
+    }
+}
+
+// 사용자 Connect와 Send 시점 재연결이 공유하는 연결 절차.
+bool TransferService::beginConnect(const std::string& ip, std::uint16_t port) {
+    _lastIp = ip;
+    _lastPort = port;
+    _sessionCompleted = false;
 
     _socket = common::net::createTcpSocket(&_loop);
     _socket->setCallback(_socketCallback.get());
     pushLink(LinkState::Reconnecting);  // 시도 중 = 노랑
 
-    const int result = _socket->connect(command.ip, command.port);
+    const int result = _socket->connect(ip, port);
     if (result < 0) {
         pushLog(common::LogLevel::Error,
                 std::string("Connect request failed: ") + ::uv_strerror(result));
         pushLink(LinkState::Disconnected);
         _socket.reset();
+        _pendingUpload.reset();
+        _reconnecting = false;
+        return false;
+    }
+
+    // CONNECTING도 "상대를 기다리는 상태"라 ②류 타임아웃을 건다 (design 9번·12번).
+    // OS의 connect 타임아웃은 플랫폼마다 달라 결정적이지 않으므로 앱에서 못 박는다.
+    if (!_connectTimer) {
+        _connectTimer = std::make_unique<common::net::Timer>(&_loop);
+    }
+    _connectTimer->start(common::protocol::kResponseTimeoutMs, [this] {
+        if (_socket && !_socket->isClosing()) {
+            pushLog(common::LogLevel::Error, "Connect timed out.");
+            _pendingUpload.reset();
+            _reconnecting = false;
+            pushLink(LinkState::Disconnected);
+            closeSocket();
+            pushSession(SessionState::Idle);
+        }
+    });
+    return true;
+}
+
+void TransferService::resumePendingUpload() {
+    if (!_pendingUpload.has_value()) {
         return;
     }
-    pushLog(common::LogLevel::Info,
-            "Connecting to " + command.ip + ":" + std::to_string(command.port) + "...");
+    const StartUploadCommand command = *_pendingUpload;
+    _pendingUpload.reset();
+    pushLog(common::LogLevel::Info, "Reconnected. Starting upload.");
+    startUpload(command);
 }
 
 void TransferService::handle(const DisconnectCommand&) {
+    // 명시적 Disconnect는 의도를 바꾼 것이므로 재연결 시도도 함께 취소한다
+    // (design 12번: 게이팅과 복구는 모두 사용자의 의도를 따른다).
+    _pendingUpload.reset();
+    _reconnecting = false;
+    _lastIp.clear();
+    _lastPort = 0;
+    if (_connectTimer) {
+        _connectTimer->stop();
+    }
+
     if (!_socket) {
         pushLink(LinkState::Disconnected);
         return;
@@ -222,14 +293,34 @@ void TransferService::handle(const DisconnectCommand&) {
 }
 
 void TransferService::handle(const StartUploadCommand& command) {
-    if (!_socket || _socket->isClosing()) {
-        pushLog(common::LogLevel::Error, "Not connected - cannot start the upload.");
-        return;
-    }
     if (_uploading) {
         pushLog(common::LogLevel::Warn, "An upload is already in progress.");
         return;
     }
+
+    // 링크가 죽어 있으면 여기서 한 번 되살린다. 사용자의 의도는 여전히 "연결"이고
+    // (Disconnect를 누르지 않았으므로), 아직 아무것도 보내지 않았으므로 재연결은
+    // 곧 새 세션 시작과 같다 (design 12번). 복구는 조용히 하지 않고 로그로 알린다.
+    if (!_socket || _socket->isClosing()) {
+        if (_lastIp.empty()) {
+            pushLog(common::LogLevel::Error, "Not connected - press Connect first.");
+            return;
+        }
+        pushLog(common::LogLevel::Info,
+                "Connection lost - reconnecting to " + _lastIp + ":" + std::to_string(_lastPort));
+        _pendingUpload = command;
+        _reconnecting = true;
+        pushSession(SessionState::Connecting);
+        if (!beginConnect(_lastIp, _lastPort)) {
+            pushSession(SessionState::Idle);
+        }
+        return;
+    }
+
+    startUpload(command);
+}
+
+void TransferService::startUpload(const StartUploadCommand& command) {
 
     // 이전 세션의 잔여 슬롯을 여기서 비운다 — release는 consumer(루프 스레드)만 부를 수 있다.
     drainRing();
@@ -501,6 +592,7 @@ void TransferService::finishDownload() {
         return;
     }
 
+    _sessionCompleted = true;  // 이후의 EOF는 정상 종료로 해석한다
     pushLog(common::LogLevel::Info, "result.csv verified - session complete");
     pushSession(SessionState::Done);
 }
@@ -570,6 +662,10 @@ void TransferService::drainRing() {
 void TransferService::handle(const QuitCommand&) {
     _reader.abortUpload();
     _uploading = false;
+    _pendingUpload.reset();
+    if (_connectTimer) {
+        _connectTimer->stop();
+    }
     closeSocket();
     // 남은 핸들(async 등)을 모두 닫으면 uv_run이 반환한다 — uv_stop보다 정리가 확실하다.
     ::uv_walk(&_loop, &TransferService::onWalkCloseCb, nullptr);

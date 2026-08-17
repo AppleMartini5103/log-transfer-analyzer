@@ -10,7 +10,10 @@
 #include <string>
 #include <thread>
 
+#include <optional>
+
 #include "net/ISocket.h"
+#include "net/Timer.h"
 #include "protocol/Framer.h"
 #include "service/Command.h"
 #include "service/FileReader.h"
@@ -86,6 +89,12 @@ private:
     void handle(const ConnectCommand& command);
     void handle(const DisconnectCommand& command);
     void handle(const StartUploadCommand& command);
+
+    // 연결 시작 공통부 (사용자 Connect / Send 시점 재연결이 같은 코드를 쓴다)
+    bool beginConnect(const std::string& ip, std::uint16_t port);
+    // 재연결이 끝난 뒤 보류해 둔 업로드를 이어서 실행
+    void resumePendingUpload();
+    void startUpload(const StartUploadCommand& command);
     void handle(const CancelUploadCommand& command);
     void handle(const QuitCommand& command);
     void closeSocket();
@@ -127,6 +136,21 @@ private:
     // 루프 스레드 전용 — 다른 스레드에서 접근 금지
     std::unique_ptr<common::net::ISocket> _socket;
     std::unique_ptr<SocketCallback> _socketCallback;
+    std::unique_ptr<common::net::Timer> _connectTimer;
+
+    // 마지막으로 연결한 주소 — Send 시점 재연결이 재사용한다 (사용자에게 다시 묻지 않는다)
+    std::string _lastIp;
+    std::uint16_t _lastPort = 0;
+
+    // 재연결 중 보류해 둔 업로드. 값 하나뿐이라 optional로 충분하다.
+    // ★ 재연결은 "아직 아무것도 안 보낸 상태"에서만 안전하다 — 전송 도중 끊김은 재개
+    //   프로토콜이 없어 처음부터 다시가 맞고, 그 판단은 사용자 몫이다 (design 12번 금지선).
+    std::optional<StartUploadCommand> _pendingUpload;
+    bool _reconnecting = false;
+
+    // 직전 세션이 정상 완료(DownloadDone 송신)됐는가 — EOF를 Info로 볼지 Warn으로 볼지의 기준.
+    // 완료 후 서버가 닫는 것은 프로토콜의 정상 종료이고, 그 전에 닫히는 것은 유휴 정리다.
+    bool _sessionCompleted = false;
 
     FileReader _reader;
 
