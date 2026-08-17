@@ -1,30 +1,67 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM Project build script (Windows) — README "Build" section entry point.
-REM Run from "x64 Native Tools Command Prompt for VS" (cl.exe / cmake required)
+REM Project build script (Windows) - README "Build" section entry point.
+REM Runs from any prompt: the MSVC environment is entered automatically.
+REM 0) makes sure the MSVC toolchain is available
 REM 1) builds 3rdparty libraries from tarballs if missing
 REM 2) configures + builds with CMake
 REM 3) runs unit tests
 
 cd /d "%~dp0"
 
+REM Resolved outside the IF blocks below: %ProgramFiles(x86)% contains parentheses,
+REM which are unsafe to expand inside a parenthesised block.
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VSPATH="
+
 echo ========================================
 echo log-transfer-analyzer Build (Windows)
 echo ========================================
 
-REM 환경 가드: 이 스크립트는 개발자 명령 프롬프트에서 실행해야 한다.
-REM 일반 프롬프트에서는 cl.exe가 PATH에 없어 3rdparty 빌드가 엉뚱하게 실패한다.
+echo [0/3] Checking MSVC toolchain...
+where cl >nul 2>nul
+if not errorlevel 1 goto :toolchain_ready
+
+REM cl.exe is absent, so this is a plain prompt rather than a developer one.
+REM Locate the Visual Studio installation that carries the C++ toolset and enter
+REM its x64 environment, instead of pushing that precondition onto the caller.
+REM Delayed expansion (!VSWHERE!) is used deliberately: %VSWHERE% would be
+REM substituted while the block is parsed, and the ")" inside "Program Files (x86)"
+REM would close the IF block early - the class of failure fixed in commit [24].
+REM Keep the vswhere call on one line as well; a caret continuation inside the
+REM backticks makes cmd execute the fragments as separate commands.
+if exist "!VSWHERE!" (
+    for /f "usebackq tokens=*" %%i in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
+)
+if defined VSPATH (
+    echo   cl.exe not in PATH - entering the x64 developer environment:
+    echo     !VSPATH!
+    REM 2>nul as well: vcvars64.bat itself prints "'vswhere.exe' is not recognized"
+    REM on some installations (it probes PATH for optional components). That noise
+    REM looks like a build error, and suppressing it is safe because the result is
+    REM verified independently by the "where cl" check right below.
+    call "!VSPATH!\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul
+)
+
 where cl >nul 2>nul
 if errorlevel 1 (
     echo.
-    echo [ERROR] MSVC compiler ^(cl.exe^) not found in PATH.
-    echo         Run this script from:
-    echo           "x64 Native Tools Command Prompt for VS 2022"
-    echo         Requires MSVC 2019 16.4+ ^(std::from_chars for floating point^).
+    echo [ERROR] MSVC compiler ^(cl.exe^) not found and no Visual Studio
+    echo         installation with the C++ toolset could be located.
+    echo         Install "Desktop development with C++" - VS 2019 16.4+ is
+    echo         required ^(std::from_chars for floating point^) - or run this
+    echo         script from "x64 Native Tools Command Prompt for VS".
     echo.
     exit /b 1
 )
+
+:toolchain_ready
+for /f "delims=" %%c in ('where cl') do (
+    echo   cl.exe: %%c
+    goto :toolchain_reported
+)
+:toolchain_reported
 
 if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
     echo [WARN] Only x64 has been verified; detected %PROCESSOR_ARCHITECTURE%. Continuing...
@@ -33,9 +70,11 @@ if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
 echo [1/3] Checking 3rdparty libraries...
 for %%L in (libuv catch2 imgui) do (
     if not exist "3rdparty\%%L\include" (
-        echo   3rdparty\%%L not built yet — running its build script...
+        echo   3rdparty\%%L not built yet - running its build script...
         pushd 3rdparty\%%L
-        call build_window.bat
+        REM ".\" is required: with NoDefaultCurrentDirectoryInExePath set, cmd does
+        REM not search the current directory and the call fails as "not recognized".
+        call .\build_window.bat
         if errorlevel 1 (
             echo [ERROR] 3rdparty\%%L build failed!
             exit /b 1
