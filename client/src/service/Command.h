@@ -22,10 +22,22 @@ struct ConnectCommand {
 
 struct DisconnectCommand {};
 
+// 업로드 시작. filename은 헤더에 실어 보낼 파일명(경로 아님 — design 8번),
+// size는 파일 선택 시 확인한 크기로, 헤더의 fileSize와 스트림 길이가 이 값으로 일치해야 한다.
+struct StartUploadCommand {
+    std::string path;
+    std::string filename;
+    std::uint64_t size = 0;
+};
+
+// 사용자 취소. 소켓 에러·타임아웃과 같은 CLEANUP 경로로 수렴한다 (design 7번).
+struct CancelUploadCommand {};
+
 // 종료도 같은 통로로 보낸다: UI 스레드에서 uv_stop을 직접 부르는 것보다
 // 루프가 스스로 핸들을 닫고 uv_run을 반환하는 편이 정리 순서가 깔끔하다 (design 7번).
 struct QuitCommand {};
 
-using Command = std::variant<ConnectCommand, DisconnectCommand, QuitCommand>;
+using Command = std::variant<ConnectCommand, DisconnectCommand, StartUploadCommand,
+                             CancelUploadCommand, QuitCommand>;
 
 }  // namespace client

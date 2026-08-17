@@ -135,15 +135,15 @@ UiCallbacks Application::makeCallbacks() {
     };
 
     callbacks.onSend = [this] {
-        _uiState.logInfo("Send requested for " + _uiState.fileName +
-                         " (transfer lands in the next issue)");
+        if (_uiState.filePath.empty()) {
+            _uiState.logError("Select a file first.");
+            return;
+        }
+        _uiState.uploadProgress = 0.0f;
+        _worker.post(StartUploadCommand{_uiState.filePath, _uiState.fileName, _uiState.fileSize});
     };
 
-    callbacks.onCancelUpload = [this] {
-        _uiState.session = SessionState::Idle;
-        _uiState.uploadProgress = 0.0f;
-        _uiState.logWarn("Upload cancelled by user.");
-    };
+    callbacks.onCancelUpload = [this] { _worker.post(CancelUploadCommand{}); };
 
     callbacks.onSaveResult = [this] {
         std::string path;
@@ -240,6 +240,12 @@ void Application::pumpWorkerEvents() {
     for (const TransferService::Event& event : _worker.drainEvents()) {
         if (event.hasLink) {
             _uiState.link = event.link;
+        }
+        if (event.hasSession) {
+            _uiState.session = event.session;
+        }
+        if (event.hasUploadProgress) {
+            _uiState.uploadProgress = event.uploadProgress;
         }
         if (!event.message.empty()) {
             _uiState.log(event.level, event.message);

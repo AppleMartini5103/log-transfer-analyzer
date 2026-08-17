@@ -12,6 +12,7 @@
 
 #include "net/ISocket.h"
 #include "service/Command.h"
+#include "service/FileReader.h"
 #include "ui/UiState.h"
 
 namespace client {
@@ -37,6 +38,12 @@ public:
     struct Event {
         LinkState link = LinkState::Disconnected;
         bool hasLink = false;
+
+        SessionState session = SessionState::Idle;
+        bool hasSession = false;
+
+        float uploadProgress = 0.0f;
+        bool hasUploadProgress = false;
 
         common::LogLevel level = common::LogLevel::Info;
         std::string message;  // 비어 있으면 로그 없음
@@ -70,11 +77,20 @@ private:
     void drainCommands();
     void handle(const ConnectCommand& command);
     void handle(const DisconnectCommand& command);
+    void handle(const StartUploadCommand& command);
+    void handle(const CancelUploadCommand& command);
     void handle(const QuitCommand& command);
     void closeSocket();
     void pushEvent(Event event);
     void pushLog(common::LogLevel level, std::string message);
     void pushLink(LinkState link);
+    void pushSession(SessionState session);
+
+    // 링에 쌓인 청크를 소켓으로 흘려보낸다 (루프 스레드 전용).
+    void pumpUpload();
+    void finishUpload();
+    void abortUpload(const std::string& reason, common::LogLevel level);
+    void drainRing();
 
     static void onAsyncCb(uv_async_t* handle);
     static void onWalkCloseCb(uv_handle_t* handle, void* arg);
@@ -95,6 +111,28 @@ private:
     // 루프 스레드 전용 — 다른 스레드에서 접근 금지
     std::unique_ptr<common::net::ISocket> _socket;
     std::unique_ptr<SocketCallback> _socketCallback;
+
+    FileReader _reader;
+
+    // 동시에 libuv에 맡겨 둘 수 있는 쓰기 요청 수.
+    // ★ 이 상한이 클라이언트 측 메모리 상한 장치다. uv_write는 비동기라 send()가 성공해도
+    //   "큐에 넣었다"는 뜻일 뿐이고, libuv가 요청마다 데이터를 복사해 들고 있는다.
+    //   완료를 기다리지 않고 계속 밀어 넣으면 링버퍼(4MB)와 무관하게 파일 전체가 쓰기 큐로
+    //   쌓인다 — 실측에서 483MB 업로드 시 peak RSS 572MB로 50MB 제약을 위반했다.
+    //   서버가 링이 차면 uv_read_stop 하는 것과 대칭으로, 클라는 미완료 쓰기가 상한에
+    //   도달하면 송신을 멈추고 onSendComplete에서 재개한다.
+    static constexpr std::size_t kMaxInFlightWrites = 8;  // 8 × 64KB = 0.5MB
+
+    // 업로드 진행 상태 (루프 스레드 전용)
+    bool _uploading = false;
+    std::size_t _inFlightWrites = 0;
+    bool _trailerSent = false;
+    std::uint64_t _uploadTotal = 0;
+    std::uint64_t _uploadSent = 0;
+    // CRC는 루프 스레드가 송신 시점에 증분 계산한다 — 트레일러를 만드는 주체와 같은
+    // 스레드여야 파서/리더의 진행을 기다릴 필요가 없다 (design 8번 확정).
+    std::uint32_t _uploadCrc = 0;
+    float _lastReportedProgress = -1.0f;
 };
 
 }  // namespace client
