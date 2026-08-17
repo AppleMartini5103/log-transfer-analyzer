@@ -46,12 +46,20 @@ using testsupport::runUntil;
 namespace {
 
 constexpr const char* kUploadName = "scenario.log";
-// 업로드 크기. "전송 중"을 확정하는 수단은 크기가 아니라 서버 동작이다 — dropOnFirstPayload는
-// 첫 페이로드 조각에서 끊고, stallAfterHeader는 읽기를 멈춰 아예 정지시킨다. 그래서 크기는
-// 소켓 버퍼를 채워 정지가 성립할 만큼만 크면 된다(미완료 쓰기 상한 8x64KB=512KB보다 넉넉히).
-// (처음엔 16MB로 시간을 벌려 했는데, 테스트 6개 x 40회 반복에서 3.8GB를 써 10분 타임아웃이
-//  났고 그렇게 벌어도 경쟁은 남았다 — Linux에서 실제로 걸렸다. 크기로 푸는 문제가 아니다.)
-constexpr std::size_t kUploadBytes = 2 * 1024 * 1024;
+// ── 업로드 크기 두 종류 ──────────────────────────────────────────────────────
+//
+// 끊기는 시나리오(dropOnFirstPayload)는 서버가 첫 페이로드 조각에서 끊으므로 작아도 된다.
+constexpr std::size_t kSmallUpload = 2 * 1024 * 1024;
+//
+// 반면 "업로드를 정지시킨 채 Cancel/Disconnect/종료를 넣는" 시나리오는 크기가 결정적이다.
+// 클라이언트가 흘려보낼 수 있는 총량 = 링버퍼 예산 4MB + 미완료 쓰기 상한 8x64KB
+//                                    + 커널 소켓 버퍼(송신+수신)
+// 이보다 작으면 서버가 읽지 않아도 업로드가 그냥 끝나버려 _uploading=false가 되고, Cancel은
+// 정상적으로 무시된다 — 제품이 옳고 테스트가 틀린 상황이 된다.
+// 실제로 2MB로 잡았다가 Linux에서 이 경쟁에 걸렸다. 2MB는 링 예산 4MB보다도 작아서
+// backpressure가 아예 발생하지 않았고, Windows에서 통과한 것은 커널 버퍼가 작아 우연히
+// 정지했던 것뿐이다. 링·커널 버퍼를 모두 넘도록 여유 있게 잡는다.
+constexpr std::size_t kLargeUpload = 32 * 1024 * 1024;
 
 // 서버 역할 최소 구현. 바이트를 세기만 하고, 응답·단절 시점은 테스트가 정한다.
 // 헤더/트레일러를 파싱하지 않는 이유: 파일 크기와 파일명을 테스트가 알고 있어 총
@@ -109,15 +117,13 @@ public:
             return;
         }
 
-        // 헤더를 받은 뒤 읽기를 멈춰 업로드를 정지시킨다.
+        // 헤더를 받은 뒤 읽기를 멈춰 업로드를 정지시킨다 (kLargeUpload와 짝을 이룬다).
         //
         // 왜 필요한가: "업로드 중"에 Cancel·Disconnect·종료를 넣는 시나리오는 그 순간 실제로
-        // 업로드가 진행 중이어야 성립한다. 그런데 2MB는 루프백에서 너무 빨리 끝나, 명령이
-        // 드레인되기 전에 업로드가 완료돼 버린다 (_uploading=false가 되면 Cancel은 정상적으로
-        // 무시된다 — 제품이 옳고 테스트가 틀린 상황이다). Linux에서 실제로 이 경쟁에 걸렸고
-        // Windows에서 통과한 것도 우연이었다.
-        // 읽기를 멈추면 양쪽 소켓 버퍼가 차고 미완료 쓰기가 상한(8청크)에 묶여 업로드가
-        // 확실히 멈춘 채로 남는다 — 파일을 키워 시간을 버는 것보다 결정적이다.
+        // 업로드가 진행 중이어야 성립한다. 읽기를 멈추면 소켓 버퍼가 차고, 링버퍼가 차고,
+        // 미완료 쓰기가 상한(8청크)에 묶여 업로드가 멈춘 채로 남는다.
+        // 단 이것만으로는 부족하다 — 파일이 링 예산(4MB)과 커널 버퍼보다 작으면 서버가 읽지
+        // 않아도 전부 흘러들어가 업로드가 끝난다. 그래서 크기(kLargeUpload)와 함께 써야 한다.
         if (stallAfterHeader && received.size() >= headerSize() && _accepted &&
             _accepted->isReading()) {
             _accepted->stopRead();
@@ -139,7 +145,7 @@ public:
     OnUploadComplete policy = OnUploadComplete::FullResult;
     bool dropOnFirstPayload = false;
     bool stallAfterHeader = false;
-    std::uint64_t uploadSize = kUploadBytes;
+    std::uint64_t uploadSize = kSmallUpload;
     std::string csv = "module,hour,count\nRadarTrackNodeState,2026-06-19 22,7\n";
 
     std::string received;
@@ -207,16 +213,37 @@ std::string writeTempFile(const std::string& path, std::size_t bytes) {
     return path;
 }
 
+// 정지 시나리오용 대용량 파일은 프로세스에서 한 번만 만든다.
+// → 왜: 테스트마다 32MB를 쓰면 반복 실행에서 디스크가 병목이 된다. 16MB를 6개 테스트 x 40회
+//   반복하다 3.8GB를 쓰고 10분 타임아웃을 실제로 겪었다. 내용은 검증 대상이 아니라 공유해도 된다.
+struct SharedLargeFile {
+    SharedLargeFile() { writeTempFile(path, kLargeUpload); }
+    ~SharedLargeFile() { std::remove(path.c_str()); }
+    std::string path = "client_scenario_large.bin";
+};
+
+const std::string& largeUploadPath() {
+    static SharedLargeFile file;  // 첫 사용 시 생성, 프로세스 종료 시 삭제
+    return file.path;
+}
+
 // 테스트 하네스: 가짜 서버 루프(이 스레드) + TransferService(자기 스레드)를 실제 TCP로 잇는다.
 struct Harness {
-    Harness() {
+    explicit Harness(std::size_t bytes = kSmallUpload) : uploadBytes(bytes) {
         REQUIRE(uv_loop_init(&loop) == 0);
         server = std::make_unique<FakeServer>(&loop);
+        server->uploadSize = bytes;
         REQUIRE(server->listen() == 0);
         REQUIRE(server->port() != 0);
         std::string error;
         REQUIRE(service.start(error));
-        writeTempFile(filePath, kUploadBytes);
+
+        if (bytes == kLargeUpload) {
+            filePath = largeUploadPath();  // 공유 파일 — 지우지 않는다
+            _ownsFile = false;
+        } else {
+            writeTempFile(filePath, bytes);
+        }
     }
 
     ~Harness() {
@@ -241,7 +268,9 @@ struct Harness {
             nullptr);
         uv_run(&loop, UV_RUN_DEFAULT);
         uv_loop_close(&loop);
-        std::remove(filePath.c_str());
+        if (_ownsFile) {
+            std::remove(filePath.c_str());
+        }
     }
 
     // 워커가 쌓아둔 이벤트를 흡수해 누적 상태로 반영한다 (UI 스레드가 매 프레임 하는 일).
@@ -335,6 +364,20 @@ struct Harness {
         }
     }
 
+    // 업로드가 "정지한 채 진행 중"임을 확정한다.
+    //
+    // 왜 단정까지 하는가: 정지 수단(서버가 읽기를 멈춤 + 링·커널 버퍼를 넘는 크기)이 어긋나면
+    // 업로드가 조용히 완료되고, 그러면 Cancel은 정상적으로 무시된다. 그 상태로 "cancelled by
+    // user" 로그를 기다리면 10초 타임아웃만 나고 원인을 알 수 없다 — Linux에서 정확히 그렇게
+    // 헤맸다. 여기서 걸리면 실패 메시지가 원인을 바로 가리킨다.
+    void requireUploadStalled() {
+        REQUIRE(waitFor([&] { return session == SessionState::Streaming; }));
+        settle();  // 진행률 이벤트가 멈출 때까지 = 더 밀어낼 수 없는 상태
+        INFO("session=" << static_cast<int>(session) << " progress=" << uploadProgress
+                        << " logs:" << allLogs());
+        REQUIRE(session == SessionState::Streaming);  // 완료됐다면 정지 수단이 깨진 것이다
+    }
+
     void connect() {
         // 이력으로 판정한다 — link는 "마지막 값"이라, 직전 소켓의 늦은 Disconnected가 같은
         // drain 배치에 섞이면 Connected를 지나쳐 버린다 (absorb는 배치를 한 번에 처리한다).
@@ -351,13 +394,14 @@ struct Harness {
     }
 
     void startUpload() {
-        service.post(client::StartUploadCommand{filePath, kUploadName, kUploadBytes});
+        service.post(client::StartUploadCommand{filePath, kUploadName, uploadBytes});
     }
 
     uv_loop_t loop{};
     std::unique_ptr<FakeServer> server;
     TransferService service;
 
+    std::size_t uploadBytes = kSmallUpload;
     std::string filePath = "client_scenario_upload.bin";
 
     LinkState link = LinkState::Disconnected;
@@ -367,6 +411,7 @@ struct Harness {
     std::deque<std::string> logs;
     std::deque<LinkState> linkHistory;
     std::deque<SessionState> sessionHistory;
+    bool _ownsFile = true;
 };
 
 // 세션을 흔드는 경로가 끝난 뒤 "UI가 다시 조작 가능한 상태로 돌아왔는가".
@@ -414,17 +459,17 @@ TEST_CASE("client scenario: server killed mid-upload releases resources and reop
 }
 
 TEST_CASE("client scenario: cancelling an upload converges on the same cleanup path") {
-    Harness harness;
-    // 서버는 받기만 하고 응답하지 않는다 — 취소가 먼저 일어나야 한다
+    Harness harness{kLargeUpload};  // 링 예산·커널 버퍼를 넘겨야 정지가 성립한다
     harness.server->stallAfterHeader = true;  // 업로드를 정지시켜 "전송 중"을 확정한다
 
     harness.connect();
     harness.startUpload();
-    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Streaming; }));
+    harness.requireUploadStalled();
 
     harness.service.post(client::CancelUploadCommand{});
 
     // 취소는 사용자 의도이므로 Warn이다 (에러가 아니다 — design 7번: 경로는 같고 표기는 다르다)
+    INFO("cancel logs:" << harness.allLogs());
     REQUIRE(harness.waitFor([&] { return harness.sawLog("cancelled by user"); }));
     const bool reusable = harness.waitForReusable();
     INFO("link=" << static_cast<int>(harness.link) << " session="
@@ -437,12 +482,12 @@ TEST_CASE("client scenario: cancelling an upload converges on the same cleanup p
 TEST_CASE("client scenario: disconnect during an upload cancels it too") {
     // Cancel 버튼이 아니라 Disconnect로 끊는 경로. design 7번의 "취소·에러·타임아웃이 모두
     // 같은 CLEANUP으로 수렴한다"가 이 경로에서도 성립해야 한다.
-    Harness harness;
+    Harness harness{kLargeUpload};  // 링 예산·커널 버퍼를 넘겨야 정지가 성립한다
     harness.server->stallAfterHeader = true;  // 업로드를 정지시켜 "전송 중"을 확정한다
 
     harness.connect();
     harness.startUpload();
-    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Streaming; }));
+    harness.requireUploadStalled();
 
     harness.service.post(client::DisconnectCommand{});
 
@@ -504,12 +549,12 @@ TEST_CASE("client scenario: quitting mid-upload joins every thread cleanly") {
     // 소멸자(=stop())가 업로드 중에도 파일 리더와 루프 스레드를 정리해야 한다.
     // design 7번 스레드 총괄표의 "종료" 칸이 비어 있으면 여기서 걸린다 (H-1 유형).
     // 정리가 실패하면 join이 걸려 이 테스트가 타임아웃으로 죽는다 — 통과 자체가 검증이다.
-    Harness harness;
+    Harness harness{kLargeUpload};  // 링 예산·커널 버퍼를 넘겨야 정지가 성립한다
     harness.server->stallAfterHeader = true;  // 업로드를 정지시켜 "전송 중"을 확정한다
 
     harness.connect();
     harness.startUpload();
-    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Streaming; }));
+    harness.requireUploadStalled();
 
     harness.service.stop();
     harness.service.stop();  // 여러 번 불러도 안전해야 한다 (stop 계약)
