@@ -205,7 +205,17 @@ UiCallbacks Application::makeCallbacks() {
 
     callbacks.onPing = [this] {
         const std::string ip(_uiState.serverIp.data());
-        _uiState.logInfo("Ping requested" + (ip.empty() ? std::string{} : ": " + ip));
+        if (ip.empty()) {
+            // 주소가 없으면 창을 열지 않는다 → 근거: 보여줄 것이 없는 빈 창은 사용자에게
+            // 아무 정보도 주지 않으면서 닫는 수고만 남긴다. 사유는 로그로 알린다
+            // (컨벤션 8번: 조용한 무시 금지). 워커 쪽 같은 검사는 방어선으로 남겨둔다.
+            _uiState.logWarn("Ping: enter the server IP first.");
+            return;
+        }
+        // 진단 창을 먼저 열어 결과가 어디로 오는지 사용자가 알게 한다 —
+        // 결과가 닫힌 창으로 들어가면 버튼이 아무 일도 안 한 것처럼 보인다
+        _uiState.pingWindowOpen = true;
+        _worker.post(PingCommand{ip});
     };
 
     callbacks.onBrowse = [this] {
@@ -365,6 +375,9 @@ void Application::pumpWorkerEvents() {
         }
         if (!event.message.empty()) {
             _uiState.log(event.level, event.message);
+        }
+        if (!event.pingLine.empty()) {
+            _uiState.appendPingLine(event.pingLine);
         }
     }
 }

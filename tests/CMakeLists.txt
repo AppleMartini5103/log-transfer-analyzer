@@ -27,6 +27,7 @@ set(COMMON_TESTS
 set(CLIENT_SOURCES
     ${CMAKE_SOURCE_DIR}/client/src/service/TransferService.cpp
     ${CMAKE_SOURCE_DIR}/client/src/service/FileReader.cpp
+    ${CMAKE_SOURCE_DIR}/client/src/service/IcmpPing.cpp
     ${CMAKE_SOURCE_DIR}/client/src/ui/UiState.cpp
 )
 
@@ -45,7 +46,8 @@ set(SERVER_TESTS
 
 if(WIN32)
     add_executable(unit_tests ${COMMON_TESTS} ${CLIENT_SOURCES})
-    target_link_libraries(unit_tests PRIVATE common ${CATCH2_LIB})
+    # iphlpapi: IcmpPing.cpp의 IcmpSendEcho 계열 (Linux에서는 그 코드가 컴파일되지 않아 불필요)
+    target_link_libraries(unit_tests PRIVATE common ${CATCH2_LIB} iphlpapi)
 else()
     add_executable(unit_tests ${COMMON_TESTS} ${SERVER_TESTS} ${CLIENT_SOURCES})
     target_link_libraries(unit_tests PRIVATE server_core common ${CATCH2_LIB})

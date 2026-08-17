@@ -15,6 +15,7 @@
 #include "protocol/Framer.h"
 #include "service/Command.h"
 #include "service/FileReader.h"
+#include "service/IcmpPing.h"
 #include "ui/UiState.h"
 
 namespace client {
@@ -52,6 +53,10 @@ public:
 
         common::LogLevel level = common::LogLevel::Info;
         std::string message;  // 비어 있으면 로그 없음
+
+        // ICMP 진단 출력 한 줄. message와 분리한 이유: 진단은 콘솔풍 창에 모아 보여야 하고
+        // (design 12번), 세션 로그와 섞이면 둘 다 읽기 어려워진다. 요약만 양쪽에 남긴다.
+        std::string pingLine;
     };
 
     // 생성자·소멸자 모두 .cpp에 정의한다: _socketCallback이 불완전 타입(SocketCallback)을
@@ -90,10 +95,12 @@ private:
 
     bool beginConnect(const std::string& ip, std::uint16_t port);
     void handle(const CancelUploadCommand& command);
+    void handle(const PingCommand& command);
     void handle(const QuitCommand& command);
     void closeSocket();
     void pushEvent(Event event);
     void pushLog(common::LogLevel level, std::string message);
+    void pushPingLine(std::string line);
     void pushLink(LinkState link);
     void pushSession(SessionState session);
 
@@ -113,6 +120,11 @@ private:
 
     static void onAsyncCb(uv_async_t* handle);
     static void onWalkCloseCb(uv_handle_t* handle, void* arg);
+
+    // ICMP 진단: 블로킹 호출을 libuv 스레드풀에 넘긴다 (design 12번 — 임의 스레드를 추가하지
+    // 않는다). onPingWorkCb는 풀 스레드, onPingDoneCb는 루프 스레드에서 돈다.
+    static void onPingWorkCb(uv_work_t* request);
+    static void onPingDoneCb(uv_work_t* request, int status);
 
     uv_loop_t _loop{};
     uv_async_t _wakeup{};
@@ -184,6 +196,16 @@ private:
 
     std::mutex _resultMutex;      // _resultCsv만 보호 (UI가 가져가므로 스레드 경계)
     std::string _resultCsv;
+
+    // ── ICMP 진단 상태 ──────────────────────────────────────────────────────
+    // 동시에 하나만 실행한다 → 근거 둘: ① uv_work_t를 멤버로 두면 컨벤션 1번(동적 할당 금지)을
+    // 지키면서 수명이 명확해진다 ② 아래 두 필드가 뮤텍스 없이 안전해진다. 루프 스레드가
+    // 큐잉 전에 쓰고, 풀 스레드가 실행 중에만 만지고, 완료 콜백(루프 스레드)이 읽는다 —
+    // 단일 in-flight가 그 순서를 보장한다. 실행 중 Ping을 다시 누르면 거절하고 알린다.
+    uv_work_t _pingWork{};
+    bool _pingRunning = false;
+    std::string _pingTarget;      // 큐잉 전에 루프 스레드가 세팅, 풀 스레드가 읽기만 한다
+    PingOutcome _pingOutcome;     // 풀 스레드가 채우고, 완료 콜백이 읽어 이벤트로 내보낸다
 };
 
 }  // namespace client

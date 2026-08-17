@@ -688,6 +688,92 @@ void TransferService::drainRing() {
     _reader.notifySpaceAvailable();
 }
 
+void TransferService::handle(const PingCommand& command) {
+    if (command.ip.empty()) {
+        pushLog(common::LogLevel::Warn, "Ping: enter the server IP first.");
+        return;
+    }
+    if (_pingRunning) {
+        // 거절하고 알린다 — 조용히 무시하면 버튼이 고장난 것처럼 보인다 (컨벤션 8번)
+        pushLog(common::LogLevel::Warn, "Ping: a diagnostic is already running.");
+        return;
+    }
+
+    _pingRunning = true;
+    _pingTarget = command.ip;
+    _pingOutcome = PingOutcome{};
+    _pingWork.data = this;
+
+    pushPingLine("--- ping " + _pingTarget + " (" + std::to_string(kDefaultPingAttempts) +
+                 " attempts) ---");
+
+    const int result = ::uv_queue_work(&_loop, &_pingWork, &TransferService::onPingWorkCb,
+                                       &TransferService::onPingDoneCb);
+    if (result < 0) {
+        _pingRunning = false;
+        pushLog(common::LogLevel::Error,
+                std::string("Ping: uv_queue_work failed: ") + ::uv_strerror(result));
+    }
+}
+
+// libuv 스레드풀에서 실행된다 — 이 함수 안에서는 소켓·큐·UI를 절대 만지지 않는다.
+// 읽는 것은 _pingTarget, 쓰는 것은 _pingOutcome뿐이고, 단일 in-flight 규칙이 그 둘의
+// 배타 접근을 보장한다 (헤더의 근거 참조).
+void TransferService::onPingWorkCb(uv_work_t* request) {
+    auto* self = static_cast<TransferService*>(request->data);
+    if (self == nullptr) {
+        return;
+    }
+    self->_pingOutcome = icmpPing(self->_pingTarget);
+}
+
+// 루프 스레드로 돌아온다 — 여기서부터 이벤트 큐를 써도 안전하다.
+void TransferService::onPingDoneCb(uv_work_t* request, int status) {
+    auto* self = static_cast<TransferService*>(request->data);
+    if (self == nullptr) {
+        return;
+    }
+    self->_pingRunning = false;
+
+    if (status == UV_ECANCELED) {
+        self->pushPingLine("ping cancelled");
+        return;
+    }
+    const PingOutcome& outcome = self->_pingOutcome;
+    if (!outcome.supported || !outcome.error.empty()) {
+        self->pushPingLine(outcome.error.empty() ? "ping unavailable" : outcome.error);
+        // 로그 창에도 남긴다 — 진단 창을 닫아둔 사용자도 실패를 알아야 한다
+        self->pushLog(common::LogLevel::Warn, "Ping failed: " + outcome.error);
+        return;
+    }
+
+    std::size_t succeeded = 0;
+    std::uint32_t totalMs = 0;
+    for (const PingReply& reply : outcome.replies) {
+        if (reply.success) {
+            ++succeeded;
+            totalMs += reply.roundTripMs;
+            self->pushPingLine("reply from " + reply.detail + ": time=" +
+                               std::to_string(reply.roundTripMs) + "ms");
+        } else {
+            self->pushPingLine(reply.detail);
+        }
+    }
+
+    const std::size_t attempted = outcome.replies.size();
+    std::string summary = std::to_string(succeeded) + "/" + std::to_string(attempted) +
+                          " replies";
+    if (succeeded > 0) {
+        summary += ", avg " + std::to_string(totalMs / succeeded) + "ms";
+    }
+    self->pushPingLine("--- " + summary + " ---");
+
+    // 요약은 로그 창에도 남긴다 — 진단 결과는 "연결 실패 원인"을 판단하는 근거라
+    // 세션 로그와 같은 시간축에 있어야 나중에 추적할 수 있다 (컨벤션 8번)
+    self->pushLog(succeeded > 0 ? common::LogLevel::Info : common::LogLevel::Warn,
+                  "Ping " + self->_pingTarget + ": " + summary);
+}
+
 void TransferService::handle(const QuitCommand&) {
     _reader.abortUpload();
     _uploading = false;
@@ -701,6 +787,13 @@ void TransferService::handle(const QuitCommand&) {
     //   콜백을 처리하며 해제한다. 소켓도 같은 이유로 closeSocket()이 자기 규칙대로 닫는다.
     _connectTimer.reset();
     closeSocket();
+
+    // 진행 중인 ICMP 진단을 취소 시도한다 → 근거: 아직 스레드풀에 들어가지 않았으면 즉시
+    // 취소되고, 이미 실행 중이면 취소되지 않아 uv_run이 그 작업을 기다린다(회당 1초 x 4회
+    // 상한이라 유계다). 취소를 시도하지 않으면 그 대기가 항상 발생한다.
+    if (_pingRunning) {
+        ::uv_cancel(reinterpret_cast<uv_req_t*>(&_pingWork));
+    }
 
     // 남은 핸들(래퍼 없는 async 등)을 모두 닫으면 uv_run이 반환한다 — uv_stop보다 정리가 확실하다.
     ::uv_walk(&_loop, &TransferService::onWalkCloseCb, nullptr);
@@ -728,6 +821,12 @@ void TransferService::pushLog(common::LogLevel level, std::string message) {
     Event event;
     event.level = level;
     event.message = std::move(message);
+    pushEvent(std::move(event));
+}
+
+void TransferService::pushPingLine(std::string line) {
+    Event event;
+    event.pingLine = std::move(line);
     pushEvent(std::move(event));
 }
 
