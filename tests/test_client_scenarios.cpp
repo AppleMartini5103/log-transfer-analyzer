@@ -68,9 +68,10 @@ class FakeServer : public IListenerCallback, public ISocketCallback {
 public:
     // 업로드를 다 받았을 때 무엇을 할지
     enum class OnUploadComplete {
-        DropSilently,   // 아무 응답 없이 끊는다 (WAIT_ACK 중 단절)
-        AckThenDrop,    // Ack만 보내고 끊는다 (WAIT_RESULT 중 단절)
-        FullResult,     // Ack + ResultHeader + CSV — 정상 완주
+        DropSilently,     // 아무 응답 없이 끊는다 (WAIT_ACK 중 단절)
+        AckThenDrop,      // Ack만 보내고 끊는다 (WAIT_RESULT 중 단절)
+        FullResult,       // Ack + ResultHeader + CSV — 정상 완주
+        OversizedResult,  // ResultHeader에 상한 초과 csvSize를 선언한다 (본문은 보내지 않는다)
     };
 
     explicit FakeServer(uv_loop_t* loop) : _listener(loop) {}
@@ -195,6 +196,17 @@ private:
         }
 
         proto::ResultHeader header;
+
+        if (policy == OnUploadComplete::OversizedResult) {
+            // 상한을 딱 1바이트 넘긴다 — 경계에서 통과/거부가 뒤집히는지까지 본다.
+            // 본문은 보내지 않는다: 클라이언트는 헤더만 보고 거부해야 하며, 실제 공격자도
+            // 선언한 만큼 보낼 의무가 없다(오히려 큰 값을 선언해 할당만 유도하는 것이 목적이다).
+            header.csvSize = proto::kMaxCsvSize + 1;
+            header.crc32 = 0;
+            sendBytes(proto::encode(header));
+            return;
+        }
+
         header.csvSize = csv.size();
         header.crc32 = common::crc32(0, csv);
         sendBytes(proto::encode(header));
@@ -594,6 +606,35 @@ TEST_CASE("client scenario: the result stays saveable after the server closes") 
     REQUIRE(ui.canConnect());                           // 다시 붙는 것도 열려 있다
     REQUIRE_FALSE(ui.canSend());                        // 연결이 없으니 Send는 잠긴다
     REQUIRE_FALSE(ui.canDisconnect());
+}
+
+TEST_CASE("client scenario: an oversized declared csvSize is rejected, not allocated") {
+    // 서버가 ResultHeader에 상한을 넘는 csvSize를 선언하는 경우.
+    //
+    // 왜 이 테스트가 필요한가: 종전 코드는 그 값을 그대로 _csv.reserve()에 넘겼다. 상대가 보낸
+    // u64 하나로 std::length_error/bad_alloc이 나고 잡는 곳이 없어 프로세스가 죽는다 — 즉
+    // "서버가 이상해지면 클라이언트가 죽는" 결합이었다. 상한 검증은 그 결합을 끊는다.
+    //
+    // 통과 조건이 "죽지 않는다"에서 멈추지 않는 이유: 거부한 뒤 UI가 다시 조작 가능해야
+    // 비로소 방어가 완결된다. WaitResult에 멈춰 있으면 사용자는 앱을 재시작해야 한다.
+    Harness harness;
+    harness.server->policy = FakeServer::OnUploadComplete::OversizedResult;
+
+    harness.connect();
+    harness.startUpload();
+
+    const bool reusable = harness.waitForReusable();
+    INFO("link=" << static_cast<int>(harness.link) << " session="
+                 << static_cast<int>(harness.session) << " logs:" << harness.allLogs());
+    REQUIRE(reusable);
+    requireReusableIdleState(harness);
+
+    // 실패 사유가 로그에 남아야 한다 — 사용자가 "왜 결과를 못 받았는지" 알 유일한 경로다
+    REQUIRE(harness.sawLog("oversized result.csv"));
+    REQUIRE(harness.errorLogs > 0);
+
+    // 거부했으므로 저장할 결과는 없다 (Done으로 가지 않았다)
+    REQUIRE(harness.service.takeResultCsv().empty());
 }
 
 TEST_CASE("client scenario: quitting mid-upload joins every thread cleanly") {

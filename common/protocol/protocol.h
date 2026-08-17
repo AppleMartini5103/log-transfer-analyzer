@@ -54,6 +54,34 @@ inline constexpr std::size_t kDownloadDoneSize = kPreambleSize;        // = 8 (�
 // fileSize = 0 허용 (빈 파일도 정상 세션). 8GiB 초과는 u64 쓰레기 값 방어
 inline constexpr std::uint64_t kMaxFileSize = 8ULL * 1024 * 1024 * 1024;
 
+// ResultHeader.csvSize 상한 — 수신 측(클라이언트)이 선할당 전에 검증한다.
+// 업로드 방향만 상한이 있고(kMaxFilenameLen·kMaxFileSize) 결과 방향에는 없던 비대칭을
+// 메우는 값이다 (컨벤션 9번: length 읽기 → 상한 검증 → 본문 읽기).
+//
+// [왜 예외 처리로는 안 되는가 — MSVC x64 실측]
+//   상한 없이 csvSize를 그대로 std::string::reserve에 넘기면 값에 따라 셋으로 갈린다:
+//     0xFFFFFFFFFFFF0000 → std::length_error("string too long")  → 잡는 곳 없어 terminate
+//     1<<62              → std::bad_alloc                        → 잡는 곳 없어 terminate
+//     64GiB              → 예외 없이 성공. capacity 68,719,476,751 확보
+//   세 번째가 문제의 핵심이다. 예외가 나지 않으므로 try/catch를 둬도 걸리지 않는다.
+//   클라이언트는 조용히 64GiB를 커밋하고 그 커밋 때문에 프로세스가 응답을 멈춘다
+//   (이 실험 자체가 3~4분간 반환되지 않았다). 즉 방어는 "예외를 잡는 것"이 아니라
+//   "할당하기 전에 값을 거부하는 것"이어야 한다.
+//
+// [4MiB의 산출 — 추정이 아니라 서버 상한에서 계산한 값]
+//   서버 CSV = 헤더 + 버킷 행 + 빈 줄 + 지표 블록 (csv/CsvBuilder.cpp)
+//     · 버킷 행 수: StatsCollector가 kMaxStatsEntries(10,000)에서 신규 키를 거부하므로
+//       전 모듈 합산 10,000행이 절대 상한이다.
+//     · 행 최대 길이: 모듈명 최장 "BeamSteerCtrlUnitImpl"(21) + ',' + "YYYY-MM-DD HH"(13)
+//       + ',' + count u64 최대 20자리 + '\n' = 57바이트
+//     · 버킷 블록 ≤ 10,000 x 57 = 570,000바이트
+//     · 헤더 18 + 빈 줄·지표 4행 약 168 = 186바이트
+//   → 서버가 만들 수 있는 CSV의 절대 최대는 약 570,186바이트(557KiB)다.
+//   4MiB는 그 7.5배로, 정상 결과를 거부할 여지가 없으면서 kMaxStatsEntries가 7배까지
+//   늘어도 프로토콜을 고칠 필요가 없다. 반대로 16MiB/64MiB급은 방어 값으로서 느슨하다 —
+//   상한의 목적은 "터지지 않기"가 아니라 "정상 범위를 넘은 즉시 세션을 끊기"다.
+inline constexpr std::uint64_t kMaxCsvSize = 4ULL * 1024 * 1024;
+
 // ── 타임아웃 (design 9번 — 값 산정 근거·재실측 절차 포함) ───────────────────
 // ①류: 데이터 흐름 상태의 무활동 타이머 (활동마다 리셋. 총 전송 시간 상한은 없음)
 inline constexpr std::uint64_t kIdleTimeoutMs = 30'000;

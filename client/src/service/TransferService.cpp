@@ -549,6 +549,18 @@ std::size_t TransferService::handleResultHeaderBytes(std::string_view data) {
         return 0;
     }
 
+    // 상한 검증은 reserve 앞이어야 한다 — 뒤로 가면 검사할 기회 자체가 없다.
+    // csvSize는 상대가 보낸 u64이고 reserve는 그 값을 그대로 믿고 할당한다. 값에 따라
+    // terminate(length_error/bad_alloc)거나, 더 나쁘게는 예외 없이 수십 GiB를 커밋해
+    // 프로세스가 멈춘다 — 실측과 근거는 kMaxCsvSize 선언부 주석에 있다 (컨벤션 9번).
+    if (header.csvSize > common::protocol::kMaxCsvSize) {
+        failSession("Server declared an oversized result.csv (" +
+                        std::to_string(header.csvSize) + " bytes > limit " +
+                        std::to_string(common::protocol::kMaxCsvSize) + ").",
+                    common::LogLevel::Error);
+        return 0;
+    }
+
     _csvSize = header.csvSize;
     _csvExpectedCrc = header.crc32;
     _csv.clear();
