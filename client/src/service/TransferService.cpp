@@ -56,11 +56,7 @@ public:
         _service.pumpUpload();
     }
 
-    void onRead(std::string_view data) override {
-        // 이 단계에서는 서버가 먼저 보내는 것이 없다 — 오면 프로토콜 위반이므로 남겨만 둔다.
-        _service.pushLog(common::LogLevel::Warn,
-                         "Unexpected " + std::to_string(data.size()) + " bytes from server");
-    }
+    void onRead(std::string_view data) override { _service.onBytes(data); }
 
     void onError(int status, std::string_view where) override {
         // 서버의 정상 종료(EOF)와 예기치 않은 단절을 구분해 표기한다 (design 12번:
@@ -150,6 +146,11 @@ void TransferService::post(Command command) {
     }
     // 타 스레드에서 부를 수 있는 유일한 libuv API (컨벤션 4번).
     ::uv_async_send(&_wakeup);
+}
+
+std::string TransferService::takeResultCsv() {
+    const std::lock_guard<std::mutex> lock(_resultMutex);
+    return _resultCsv;  // 저장이 실패해도 다시 시도할 수 있게 비우지 않는다
 }
 
 std::deque<TransferService::Event> TransferService::drainEvents() {
@@ -246,6 +247,16 @@ void TransferService::handle(const StartUploadCommand& command) {
     _lastReportedProgress = -1.0f;
     _inFlightWrites = 0;
     _trailerSent = false;
+    _expecting = Expecting::Nothing;
+    _csv.clear();
+    {
+        const std::lock_guard<std::mutex> lock(_resultMutex);
+        _resultCsv.clear();  // 새 세션이 시작되면 지난 결과는 버린다
+    }
+    Event reset;
+    reset.downloadProgress = 0.0f;
+    reset.hasDownloadProgress = true;
+    pushEvent(std::move(reset));
 
     common::protocol::UploadHeader header;
     header.fileSize = command.size;
@@ -334,6 +345,180 @@ void TransferService::pumpUpload() {
     }
 }
 
+// ── 수신 경로 ────────────────────────────────────────────────────────────────
+// 서버는 Ack -> ResultHeader -> CSV 순으로 보내고, 이들이 한 번의 onRead에 붙어 오거나
+// 반대로 하나가 여러 번에 쪼개져 올 수 있다. 그래서 "기대하는 것"을 상태로 들고,
+// 입력을 소비한 만큼 잘라가며 반복 처리한다 (컨벤션 9번: 필요 바이트가 모일 때까지 누적).
+void TransferService::onBytes(std::string_view data) {
+    while (!data.empty()) {
+        std::size_t consumed = 0;
+        switch (_expecting) {
+            case Expecting::Ack:
+                consumed = handleAckBytes(data);
+                break;
+            case Expecting::ResultHeader:
+                consumed = handleResultHeaderBytes(data);
+                break;
+            case Expecting::CsvPayload:
+                consumed = handleCsvBytes(data);
+                break;
+            case Expecting::Nothing:
+            default:
+                // 세션 순서상 서버가 말을 걸 차례가 아니다 = 스트림이 꼬였다는 뜻.
+                failSession("Unexpected " + std::to_string(data.size()) +
+                                " bytes from server - closing the session.",
+                            common::LogLevel::Error);
+                return;
+        }
+        if (consumed == 0) {
+            return;  // 더 받아야 하거나, 실패로 세션을 끝냈다
+        }
+        data.remove_prefix(consumed);
+    }
+}
+
+std::size_t TransferService::handleAckBytes(std::string_view data) {
+    const auto result = _framer.feed(common::protocol::ByteView{data.data(), data.size()});
+    if (result.status == common::protocol::DecodeStatus::NeedMoreData) {
+        return result.consumed;
+    }
+    if (result.status != common::protocol::DecodeStatus::Ok) {
+        failSession("Malformed ack from server - closing the session.", common::LogLevel::Error);
+        return 0;
+    }
+
+    common::protocol::Ack ack;
+    if (common::protocol::decode(_framer.message(), ack) != common::protocol::DecodeStatus::Ok) {
+        failSession("Cannot decode the ack from server.", common::LogLevel::Error);
+        return 0;
+    }
+
+    if (ack.status != common::protocol::AckStatus::Ok) {
+        // 서버가 사유를 실어 보내고 닫는다 — 그 사유를 그대로 사용자에게 보여준다
+        // (design 8번 근거 3: "왜 죽었지?"를 만들지 않는다).
+        const char* reason = "unknown error";
+        switch (ack.status) {
+            case common::protocol::AckStatus::CrcMismatch:   reason = "CRC mismatch"; break;
+            case common::protocol::AckStatus::SizeMismatch:  reason = "size mismatch"; break;
+            case common::protocol::AckStatus::ProtocolError: reason = "protocol error"; break;
+            case common::protocol::AckStatus::ServerError:   reason = "server error"; break;
+            default: break;
+        }
+        failSession(std::string("Server rejected the upload: ") + reason + " (received " +
+                        std::to_string(ack.receivedBytes) + " bytes)",
+                    common::LogLevel::Error);
+        return 0;
+    }
+
+    pushLog(common::LogLevel::Info,
+            "Server verified the upload (" + std::to_string(ack.receivedBytes) +
+                " bytes) - analyzing");
+    pushSession(SessionState::WaitResult);
+
+    _expecting = Expecting::ResultHeader;
+    _framer.reset(common::protocol::MessageType::ResultHeader);
+    return result.consumed;
+}
+
+std::size_t TransferService::handleResultHeaderBytes(std::string_view data) {
+    const auto result = _framer.feed(common::protocol::ByteView{data.data(), data.size()});
+    if (result.status == common::protocol::DecodeStatus::NeedMoreData) {
+        return result.consumed;
+    }
+    if (result.status != common::protocol::DecodeStatus::Ok) {
+        failSession("Malformed result header from server.", common::LogLevel::Error);
+        return 0;
+    }
+
+    common::protocol::ResultHeader header;
+    if (common::protocol::decode(_framer.message(), header) !=
+        common::protocol::DecodeStatus::Ok) {
+        failSession("Cannot decode the result header.", common::LogLevel::Error);
+        return 0;
+    }
+
+    _csvSize = header.csvSize;
+    _csvExpectedCrc = header.crc32;
+    _csv.clear();
+    _csv.reserve(static_cast<std::size_t>(_csvSize));
+    _lastReportedDownload = -1.0f;
+    _expecting = Expecting::CsvPayload;
+
+    pushLog(common::LogLevel::Info,
+            "Receiving result.csv (" + std::to_string(_csvSize) + " bytes)");
+    pushSession(SessionState::ReceivingResult);
+
+    if (_csvSize == 0) {
+        finishDownload();  // 빈 CSV도 정상 (design 8번: fileSize 0 세션의 대칭)
+    }
+    return result.consumed;
+}
+
+std::size_t TransferService::handleCsvBytes(std::string_view data) {
+    const std::size_t remaining = static_cast<std::size_t>(_csvSize) - _csv.size();
+    const std::size_t take = data.size() < remaining ? data.size() : remaining;
+    _csv.append(data.data(), take);
+
+    const float progress = static_cast<float>(static_cast<double>(_csv.size()) /
+                                              static_cast<double>(_csvSize));
+    if (progress - _lastReportedDownload >= 0.05f || _csv.size() == _csvSize) {
+        _lastReportedDownload = progress;
+        Event event;
+        event.downloadProgress = progress;
+        event.hasDownloadProgress = true;
+        pushEvent(std::move(event));
+    }
+
+    if (_csv.size() == _csvSize) {
+        finishDownload();
+    }
+    return take;
+}
+
+void TransferService::finishDownload() {
+    // 다운로드 CRC는 헤더에 실려 오므로 수신 완료 후 한 번에 검증한다 (수 KB — design 8번).
+    const std::uint32_t actual = common::crc32(0, _csv);
+    if (actual != _csvExpectedCrc) {
+        failSession("result.csv CRC mismatch (expected " + std::to_string(_csvExpectedCrc) +
+                        ", got " + std::to_string(actual) + ")",
+                    common::LogLevel::Error);
+        return;
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(_resultMutex);
+        _resultCsv = _csv;
+    }
+    _csv.clear();
+    _expecting = Expecting::Nothing;
+
+    // 프로토콜의 마지막 한 마디 — 이걸 받아야 서버가 세션을 정리하고 다음 연결을 받는다.
+    const std::vector<char> done = common::protocol::encodeDownloadDone();
+    const int result = _socket->send(std::string_view(done.data(), done.size()));
+    if (result < 0) {
+        failSession(std::string("Failed to send DownloadDone: ") + ::uv_strerror(result),
+                    common::LogLevel::Error);
+        return;
+    }
+
+    pushLog(common::LogLevel::Info, "result.csv verified - session complete");
+    pushSession(SessionState::Done);
+}
+
+void TransferService::failSession(const std::string& reason, common::LogLevel level) {
+    if (_uploading) {
+        _reader.abortUpload();
+        _uploading = false;
+        drainRing();
+    }
+    _expecting = Expecting::Nothing;
+    _csv.clear();
+
+    pushLog(level, reason);
+    closeSocket();
+    pushSession(SessionState::Idle);
+}
+
 void TransferService::finishUpload() {
     _trailerSent = true;
     common::protocol::UploadTrailer trailer;
@@ -352,6 +537,10 @@ void TransferService::finishUpload() {
             "Upload finished (" + std::to_string(_uploadSent) + " bytes, crc32=" +
                 std::to_string(_uploadCrc) + ") - waiting for ack");
     pushSession(SessionState::WaitAck);
+
+    // 이제부터 서버가 말할 차례다 (design 8번 메시지 순서).
+    _expecting = Expecting::Ack;
+    _framer.reset(common::protocol::MessageType::Ack);
 }
 
 void TransferService::abortUpload(const std::string& reason, common::LogLevel level) {

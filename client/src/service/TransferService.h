@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "net/ISocket.h"
+#include "protocol/Framer.h"
 #include "service/Command.h"
 #include "service/FileReader.h"
 #include "ui/UiState.h"
@@ -45,6 +46,9 @@ public:
         float uploadProgress = 0.0f;
         bool hasUploadProgress = false;
 
+        float downloadProgress = 0.0f;
+        bool hasDownloadProgress = false;
+
         common::LogLevel level = common::LogLevel::Info;
         std::string message;  // 비어 있으면 로그 없음
     };
@@ -70,6 +74,10 @@ public:
     // UI 스레드가 매 프레임 호출해 쌓인 이벤트를 가져간다.
     std::deque<Event> drainEvents();
 
+    // 수신한 result.csv를 UI가 가져가 저장한다 (Save 버튼). 세션당 한 번만 채워지고,
+    // 다음 업로드 시작 시 비워진다. 수 KB라 값 복사로 넘겨도 부담이 없다.
+    std::string takeResultCsv();
+
 private:
     class SocketCallback;
 
@@ -91,6 +99,14 @@ private:
     void finishUpload();
     void abortUpload(const std::string& reason, common::LogLevel level);
     void drainRing();
+
+    // 수신 경로 (루프 스레드 전용): 스트림을 메시지·페이로드로 갈라 처리한다.
+    void onBytes(std::string_view data);
+    std::size_t handleAckBytes(std::string_view data);
+    std::size_t handleResultHeaderBytes(std::string_view data);
+    std::size_t handleCsvBytes(std::string_view data);
+    void finishDownload();
+    void failSession(const std::string& reason, common::LogLevel level);
 
     static void onAsyncCb(uv_async_t* handle);
     static void onWalkCloseCb(uv_handle_t* handle, void* arg);
@@ -133,6 +149,20 @@ private:
     // 스레드여야 파서/리더의 진행을 기다릴 필요가 없다 (design 8번 확정).
     std::uint32_t _uploadCrc = 0;
     float _lastReportedProgress = -1.0f;
+
+    // 수신 상태 (루프 스레드 전용). 세션 순서가 고정이라 "지금 기대하는 것"이 하나로 정해진다:
+    // Ack -> ResultHeader -> CSV 페이로드 -> (DownloadDone 송신) -> 완료
+    enum class Expecting : std::uint8_t { Nothing, Ack, ResultHeader, CsvPayload };
+    Expecting _expecting = Expecting::Nothing;
+    common::protocol::Framer _framer{common::protocol::MessageType::Ack};
+
+    std::string _csv;             // 수신 중인 result.csv (수 KB — 메모리 보관이 정상)
+    std::uint64_t _csvSize = 0;
+    std::uint32_t _csvExpectedCrc = 0;
+    float _lastReportedDownload = -1.0f;
+
+    std::mutex _resultMutex;      // _resultCsv만 보호 (UI가 가져가므로 스레드 경계)
+    std::string _resultCsv;
 };
 
 }  // namespace client

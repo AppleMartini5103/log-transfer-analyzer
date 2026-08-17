@@ -184,7 +184,7 @@ void UiRenderer::renderTransferRow(UiState& state, const UiCallbacks& callbacks)
     ImGui::SetNextItemWidth(400.0f);
     ImGui::ProgressBar(state.downloadProgress, ImVec2(400.0f, 0.0f));
     ImGui::SameLine();
-    if (buttonGated("Save...", state.canSaveResult())) {
+    if (buttonGated("Save", state.canSaveResult())) {
         invoke(callbacks.onSaveResult);
     }
 

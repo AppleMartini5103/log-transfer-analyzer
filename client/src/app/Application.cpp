@@ -4,6 +4,8 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include <fstream>
+
 #include "ui/FileDialog.h"
 #include "util/Version.h"
 
@@ -146,6 +148,12 @@ UiCallbacks Application::makeCallbacks() {
     callbacks.onCancelUpload = [this] { _worker.post(CancelUploadCommand{}); };
 
     callbacks.onSaveResult = [this] {
+        const std::string csv = _worker.takeResultCsv();
+        if (csv.empty()) {
+            _uiState.logError("No result to save yet.");
+            return;
+        }
+
         std::string path;
         std::string error;
         if (!saveFileDialog(_hwnd, "result.csv", path, error)) {
@@ -154,7 +162,19 @@ UiCallbacks Application::makeCallbacks() {
             }
             return;
         }
-        _uiState.logInfo("Result would be saved to " + path);
+
+        // 텍스트 모드로 열면 Windows가 \n을 \r\n으로 바꿔 서버가 계산한 CRC와 어긋난다.
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            _uiState.logError("Cannot write to " + path);
+            return;
+        }
+        out.write(csv.data(), static_cast<std::streamsize>(csv.size()));
+        if (!out.good()) {
+            _uiState.logError("Failed while writing " + path);
+            return;
+        }
+        _uiState.logInfo("Saved " + std::to_string(csv.size()) + " bytes to " + path);
     };
 
     return callbacks;
@@ -246,6 +266,9 @@ void Application::pumpWorkerEvents() {
         }
         if (event.hasUploadProgress) {
             _uiState.uploadProgress = event.uploadProgress;
+        }
+        if (event.hasDownloadProgress) {
+            _uiState.downloadProgress = event.downloadProgress;
         }
         if (!event.message.empty()) {
             _uiState.log(event.level, event.message);
