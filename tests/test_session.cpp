@@ -3,6 +3,8 @@
 #include "session/SessionManager.h"
 #include "util/Crc32.h"
 
+#include "TestLoop.h"
+
 #include <catch_amalgamated.hpp>
 
 #include <string>
@@ -14,6 +16,7 @@ using common::net::TcpSocket;
 using common::net::WritableBuffer;
 using server::session::SessionManager;
 using server::session::SessionTimeouts;
+using testsupport::runUntil;
 
 namespace {
 
@@ -52,22 +55,6 @@ private:
 // 테스트용 소형 링 — 실제 기본값(64슬롯x64KB)보다 작게 잡아 backpressure를 쉽게 재현한다
 constexpr std::size_t kTestChunkSize = 16 * 1024;
 constexpr std::size_t kTestRingSlots = 8;
-
-template <typename Predicate>
-bool runUntil(uv_loop_t* loop, Predicate predicate, int maxIterations = 5000) {
-    for (int i = 0; i < maxIterations; ++i) {
-        if (predicate()) {
-            return true;
-        }
-        uv_run(loop, UV_RUN_NOWAIT);
-        // NOWAIT로만 돌리면 벽시계가 거의 진행되지 않아 타이머가 만료되지 못한다.
-        // 주기적으로 잠깐 재워 실제 시간이 흐르게 한다 (타임아웃 테스트의 전제)
-        if ((i % 4) == 3 && !predicate()) {
-            uv_sleep(1);
-        }
-    }
-    return predicate();
-}
 
 void drainLoop(uv_loop_t* loop) {
     uv_walk(

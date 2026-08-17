@@ -1,6 +1,8 @@
 #include "net/Listener.h"
 #include "net/TcpSocket.h"
 
+#include "TestLoop.h"
+
 #include <catch_amalgamated.hpp>
 
 #include <array>
@@ -14,6 +16,7 @@ using common::net::ISocketCallback;
 using common::net::Listener;
 using common::net::TcpSocket;
 using common::net::WritableBuffer;
+using testsupport::runUntil;
 
 namespace {
 
@@ -84,18 +87,6 @@ private:
     Listener& _listener;
     ISocketCallback* _serverCallback;
 };
-
-// 조건이 만족되거나 최대 반복 횟수에 도달할 때까지 루프를 돌린다 (테스트 교착 방지)
-template <typename Predicate>
-bool runUntil(uv_loop_t* loop, Predicate predicate, int maxIterations = 2000) {
-    for (int i = 0; i < maxIterations; ++i) {
-        if (predicate()) {
-            return true;
-        }
-        uv_run(loop, UV_RUN_NOWAIT);
-    }
-    return predicate();
-}
 
 // 루프에 남은 핸들을 모두 닫고 정리 (테스트 간 자원 누수 방지)
 void drainLoop(uv_loop_t* loop) {
@@ -185,8 +176,10 @@ TEST_CASE("net: large payload arrives complete across many chunks") {
     // 1MB — 스트림이 여러 조각으로 쪼개져 도착함을 확인 (프레이머·재조립의 전제)
     const std::string payload(1024 * 1024, 'X');
     REQUIRE(client.send(payload) == 0);
+    // 1MB는 루프백에서 1초도 걸리지 않지만, 상한을 넉넉히 둔다 — 조건이 만족되면 즉시
+    // 빠져나오므로 큰 상한은 비용이 없고, 부하가 걸린 머신에서의 헛된 실패만 막아준다.
     REQUIRE(runUntil(&fixture.loop, [&] { return serverSide.received.size() >= payload.size(); },
-                     20000));
+                     20000 /* ms */));
     REQUIRE(serverSide.received.size() == payload.size());
     REQUIRE(serverSide.received == payload);
 }

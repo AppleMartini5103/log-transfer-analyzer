@@ -3,6 +3,8 @@
 #include "session/SessionManager.h"
 #include "util/Crc32.h"
 
+#include "TestLoop.h"
+
 #include <catch_amalgamated.hpp>
 
 #include <cstdio>
@@ -15,6 +17,7 @@ namespace proto = common::protocol;
 using common::net::TcpSocket;
 using common::net::WritableBuffer;
 using server::session::SessionManager;
+using testsupport::runUntil;
 
 namespace {
 
@@ -52,20 +55,6 @@ public:
 private:
     std::vector<char> _slot;
 };
-
-template <typename Predicate>
-bool runUntil(uv_loop_t* loop, Predicate predicate, int maxIterations = 8000) {
-    for (int i = 0; i < maxIterations; ++i) {
-        if (predicate()) {
-            return true;
-        }
-        uv_run(loop, UV_RUN_NOWAIT);
-        if ((i % 4) == 3 && !predicate()) {
-            uv_sleep(1);
-        }
-    }
-    return predicate();
-}
 
 void drainLoop(uv_loop_t* loop) {
     uv_walk(
