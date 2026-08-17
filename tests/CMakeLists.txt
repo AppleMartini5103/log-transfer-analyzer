@@ -33,7 +33,12 @@ set(CLIENT_SOURCES
 )
 
 # 서버 테스트는 Linux 전용 (서버 자체가 Linux 전용이라 Windows 빌드 대상이 아니다).
+#
+# test_signal_guard.cpp가 이 목록에 있는 이유: SIGPIPE는 POSIX 개념이라 Windows에는 없고,
+# 가드가 재사용하는 installProcessSignalDefaults()는 server_core에 있어 Windows 빌드에서는
+# 링크되지 않는다 (아래 add_executable 분기). 즉 Linux 전용 목록이 #ifdef 없는 해답이다.
 set(SERVER_TESTS
+    test_signal_guard.cpp
     test_line_reassembler.cpp
     test_log_line_parser.cpp
     test_stats_collector.cpp

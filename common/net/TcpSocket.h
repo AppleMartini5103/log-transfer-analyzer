@@ -18,6 +18,16 @@
 // [스레드 규칙]
 //   모든 메서드는 루프를 돌리는 스레드에서만 호출한다. 타 스레드에서 허용되는 libuv API는
 //   uv_async_send 하나뿐이다 (컨벤션 4번).
+//
+// [프로세스 전제 — Linux (①등급)]
+//   이 소켓으로 write하는 프로세스는 진입점에서 SIGPIPE를 무시해야 한다. libuv의
+//   uv__try_write가 MSG_NOSIGNAL 없는 write(2)를 호출하므로, 상대가 끊은 소켓에 쓰면
+//   실패가 EPIPE로 돌아오는 대신 SIGPIPE 기본 동작으로 프로세스가 즉사한다 —
+//   설계된 CLEANUP 경로(design 10번)가 통째로 우회된다.
+//   책임 주체: 서버는 main()의 installProcessSignalDefaults(),
+//   테스트 바이너리는 tests/test_signal_guard.cpp. 전송 계층을 쓰는 새 진입점을 만들면
+//   그 진입점도 같은 전제를 세워야 한다 (전제를 적어두지 않아 테스트 바이너리가 실제로
+//   이 함정을 밟았다 — 이슈 46).
 
 namespace common::net {
 
