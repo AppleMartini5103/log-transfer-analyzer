@@ -100,14 +100,12 @@ UiCallbacks Application::makeCallbacks() {
             _uiState.logError("Server IP is empty.");
             return;
         }
-        // 의도 상태만 여기서 바꾼다 — 실제 연결(LinkState)은 소켓 이벤트가 정한다
-        // (design 12번: 게이팅은 의도를 따르고 인디케이터는 실제를 보여준다).
-        _uiState.connectIntent = true;
+        // 링크 상태는 소켓 이벤트만 정한다 — 여기서 미리 초록으로 바꾸지 않는다.
+        // 화면이 실제보다 앞서 나가면 "연결됐다는데 왜 Send가 안 되지"가 된다.
         _worker.post(ConnectCommand{ip, port});
     };
 
     callbacks.onDisconnect = [this] {
-        _uiState.connectIntent = false;
         _uiState.session = SessionState::Idle;
         _uiState.uploadProgress = 0.0f;
         _uiState.downloadProgress = 0.0f;

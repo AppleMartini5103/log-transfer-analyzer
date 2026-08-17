@@ -108,15 +108,18 @@ bool isBusy(SessionState session) {
 }  // namespace
 
 bool UiState::canEditAddress() const {
-    return !connectIntent && !isBusy(session);
+    return link == LinkState::Disconnected && !isBusy(session);
 }
 
 bool UiState::canConnect() const {
-    return !connectIntent && !isBusy(session);
+    // 끊긴 상태에서 사용자가 할 일은 Connect 하나다. Send로도 붙을 수 있게 하면
+    // 같은 일을 하는 버튼이 둘이 되어 화면이 모호해진다.
+    return link == LinkState::Disconnected && !isBusy(session);
 }
 
 bool UiState::canDisconnect() const {
-    return connectIntent;
+    // 연결 시도 중(노랑)에도 열어둔다 — 그것이 시도를 취소하는 유일한 수단이다.
+    return link != LinkState::Disconnected;
 }
 
 bool UiState::canBrowse() const {
@@ -126,7 +129,7 @@ bool UiState::canBrowse() const {
 }
 
 bool UiState::canSend() const {
-    return connectIntent && !isBusy(session) && !filePath.empty();
+    return link == LinkState::Connected && !isBusy(session) && !filePath.empty();
 }
 
 bool UiState::canCancelUpload() const {

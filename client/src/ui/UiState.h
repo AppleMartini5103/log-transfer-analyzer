@@ -13,10 +13,11 @@ namespace client {
 // 화면이 그리는 데 필요한 상태 전부. UiRenderer는 이 구조를 읽기만 하고,
 // 실제 동작(연결·전송)은 Application이 콜백으로 처리한다 (design 6번: UiState/UiRenderer 분리).
 //
-// 상태 축이 둘로 나뉘는 것이 이 화면의 핵심 규칙이다 (design 12번):
-//  - 의도(intent): 사용자가 Connect/Disconnect로만 바꾼다 → 버튼 게이팅의 기준
-//  - 실제(actual): 소켓 이벤트로 바뀐다 (서버 유휴 정리·네트워크 단절) → 인디케이터가 보여준다
-// 게이팅은 의도를 따르고, 인디케이터는 실제를 보여주며, 재연결이 둘의 괴리를 해소한다.
+// 게이팅과 인디케이터는 모두 "실제 링크 상태" 하나를 따른다 (design 12번).
+// 끊김은 곧 연결 해제로 취급하므로 화면이 언제나 한 가지 이야기만 한다:
+//   회색이면 Connect만 열리고, 초록이면 Send·Disconnect가 열린다.
+// 의도(intent)를 별도 축으로 두면 "끊겼다고 표시하면서 Connect는 잠긴" 상태가 생기고,
+// 사용자가 어느 버튼을 눌러야 하는지 판단해야 한다 — 그 모호함을 없애는 것이 이 규칙이다.
 
 // 실제 연결 상태 — 인디케이터 3단계
 enum class LinkState : std::uint8_t {
@@ -50,9 +51,6 @@ public:
 
     LinkState link = LinkState::Disconnected;
     SessionState session = SessionState::Idle;
-
-    // 의도 상태: Connect를 한 번이라도 눌렀는지. Disconnect로만 false가 된다.
-    bool connectIntent = false;
 
     // 선택된 파일 (검증 통과분만 채운다 — 검증 실패 시 비워 Send를 잠근다)
     std::string filePath;
