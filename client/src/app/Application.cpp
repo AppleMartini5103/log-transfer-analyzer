@@ -23,6 +23,10 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg
 namespace client {
 
 Application::~Application() {
+    // 초기화의 역순으로 정리한다 (design 10번). 워커를 먼저 세워야 루프 스레드가
+    // 죽은 뒤에 창·디바이스가 사라진다 — 반대로 하면 콜백이 사라진 자원을 만진다.
+    _worker.stop();
+
     if (_imguiInitialized) {
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();
@@ -64,6 +68,12 @@ bool Application::initialize(HINSTANCE instance, std::string& error) {
     _imguiInitialized = true;
     _uiCallbacks = makeCallbacks();
 
+    // 워커는 UI가 준비된 뒤 띄운다 — 초기화 순서는 "표시 수단 -> 스레드"여야
+    // 워커의 첫 에러도 화면에 남는다 (design 10번 초기화 순서와 같은 원칙).
+    if (!_worker.start(error)) {
+        return false;
+    }
+
     _uiState.logInfo(std::string(common::kProjectName) + " client started (built " +
                      std::string(common::buildDate()) + ")");
 
@@ -88,19 +98,18 @@ UiCallbacks Application::makeCallbacks() {
             _uiState.logError("Server IP is empty.");
             return;
         }
-        // 의도 상태만 바꾼다 — 실제 연결(LinkState)은 소켓 이벤트가 정한다 (design 12번).
+        // 의도 상태만 여기서 바꾼다 — 실제 연결(LinkState)은 소켓 이벤트가 정한다
+        // (design 12번: 게이팅은 의도를 따르고 인디케이터는 실제를 보여준다).
         _uiState.connectIntent = true;
-        _uiState.logInfo("Connect requested: " + ip + ":" + std::to_string(port) +
-                         " (networking lands in the next issue)");
+        _worker.post(ConnectCommand{ip, port});
     };
 
     callbacks.onDisconnect = [this] {
         _uiState.connectIntent = false;
-        _uiState.link = LinkState::Disconnected;
         _uiState.session = SessionState::Idle;
         _uiState.uploadProgress = 0.0f;
         _uiState.downloadProgress = 0.0f;
-        _uiState.logInfo("Disconnected by user.");
+        _worker.post(DisconnectCommand{});
     };
 
     callbacks.onPing = [this] {
@@ -225,7 +234,22 @@ void Application::resizeIfRequested() {
     _pendingHeight = 0;
 }
 
+// 워커 -> UI는 폴링으로만 흐른다. 워커가 UiState를 직접 만지면 ImGui가 그리는 도중에
+// 상태가 바뀌어 한 프레임 안에서 화면이 어긋난다 (design 7번).
+void Application::pumpWorkerEvents() {
+    for (const TransferService::Event& event : _worker.drainEvents()) {
+        if (event.hasLink) {
+            _uiState.link = event.link;
+        }
+        if (!event.message.empty()) {
+            _uiState.log(event.level, event.message);
+        }
+    }
+}
+
 void Application::renderFrame() {
+    pumpWorkerEvents();
+
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();

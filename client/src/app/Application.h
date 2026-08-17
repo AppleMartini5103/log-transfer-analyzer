@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include "service/TransferService.h"
 #include "ui/UiRenderer.h"
 #include "ui/UiState.h"
 
@@ -46,6 +47,9 @@ private:
     // 다음 이슈에서 커맨드 큐 + uv_async_send로 루프 스레드에 넘기는 자리다 (design 7번).
     UiCallbacks makeCallbacks();
 
+    // 워커가 보낸 이벤트를 UiState에 반영한다 (매 프레임, UI 스레드에서만).
+    void pumpWorkerEvents();
+
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
     HWND _hwnd = nullptr;
@@ -55,6 +59,7 @@ private:
     UiState _uiState;
     UiRenderer _uiRenderer;
     UiCallbacks _uiCallbacks;
+    TransferService _worker;
 
     Microsoft::WRL::ComPtr<ID3D11Device> _device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> _deviceContext;
