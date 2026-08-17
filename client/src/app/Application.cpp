@@ -244,6 +244,18 @@ UiCallbacks Application::makeCallbacks() {
             _uiState.logError("Select a file first.");
             return;
         }
+
+        // 시작 전에 한 번 묻는다 (design 88행 유지 항목). 500MB 전송은 되돌릴 수 없고,
+        // Cancel을 눌러도 서버 세션 하나가 이미 소비된다 — 1:1이라 그 사이 다른 클라이언트는
+        // 대기한다. 대상 주소까지 보여주는 이유는 주소 오입력도 같이 잡기 위함이다.
+        const std::string destination =
+            std::string(_uiState.serverIp.data()) + ":" + std::string(_uiState.serverPort.data());
+        if (!confirmUpload(_hwnd, _uiState.fileName, _uiState.fileSize, destination)) {
+            // 취소는 정상 조작이므로 Info로 남긴다 — 에러가 아니다
+            _uiState.logInfo("Upload cancelled before it started.");
+            return;
+        }
+
         _uiState.uploadProgress = 0.0f;
         _worker.post(StartUploadCommand{_uiState.filePath, _uiState.fileName, _uiState.fileSize});
     };

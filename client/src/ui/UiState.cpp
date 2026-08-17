@@ -48,6 +48,19 @@ std::string formatEntry(common::LogLevel level, const std::string& message) {
 
 }  // namespace
 
+std::string humanSize(std::uint64_t bytes) {
+    constexpr double kMega = 1024.0 * 1024.0;
+    std::array<char, 64> buffer{};
+    if (bytes >= static_cast<std::uint64_t>(kMega)) {
+        std::snprintf(buffer.data(), buffer.size(), "%.1f MB",
+                      static_cast<double>(bytes) / kMega);
+    } else {
+        std::snprintf(buffer.data(), buffer.size(), "%llu bytes",
+                      static_cast<unsigned long long>(bytes));
+    }
+    return std::string(buffer.data());
+}
+
 UiState::UiState() {
     // 기본 주소는 비워두고 포트만 확정값으로 채운다 (design 5번: 기본 포트 23507)
     const std::string port = std::to_string(common::protocol::kDefaultPort);

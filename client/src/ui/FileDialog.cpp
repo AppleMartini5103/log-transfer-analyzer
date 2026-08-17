@@ -6,6 +6,7 @@
 #include <array>
 
 #include "protocol/protocol.h"
+#include "ui/UiState.h"      // humanSize — 화면과 같은 크기 표기를 쓴다
 
 namespace client {
 namespace {
@@ -147,6 +148,30 @@ bool saveFileDialog(void* ownerWindow, const std::string& defaultName, std::stri
         return false;
     }
     return true;
+}
+
+bool confirmUpload(void* ownerWindow, const std::string& fileName, std::uint64_t fileSize,
+                   const std::string& destination) {
+    // 무엇을 어디로 보내는지 한 문장에 담는다 — 파일명만 보여주면 주소를 잘못 넣은 실수를
+    // 잡을 수 없고, 주소만 보여주면 파일을 잘못 고른 실수를 잡을 수 없다.
+    const std::string text = "Send " + fileName + " (" + humanSize(fileSize) + ") to " +
+                             destination + "?";
+
+    std::array<wchar_t, 1024> wide{};
+    const int wideLength =
+        ::MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), wide.data(),
+                              static_cast<int>(wide.size() - 1));
+    if (wideLength <= 0) {
+        return false;  // 문구를 만들 수 없으면 묻지 못한 것이므로 보내지 않는다
+    }
+    wide[static_cast<std::size_t>(wideLength)] = L'\0';
+
+    // MB_DEFBUTTON2: 기본 선택을 No에 둔다 → 근거: Enter를 무심코 누르는 것이 500MB 전송으로
+    // 이어지면 확인 대화상자를 둔 목적이 사라진다. 되돌릴 수 없는 동작의 기본값은 "안 함"이다.
+    const int answer = ::MessageBoxW(static_cast<HWND>(ownerWindow), wide.data(),
+                                     L"Confirm upload",
+                                     MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+    return answer == IDYES;
 }
 
 }  // namespace client

@@ -57,18 +57,6 @@ const char* sessionLabel(SessionState session) {
     }
 }
 
-std::string humanSize(std::uint64_t bytes) {
-    constexpr double kMega = 1024.0 * 1024.0;
-    char buffer[64];
-    if (bytes >= static_cast<std::uint64_t>(kMega)) {
-        std::snprintf(buffer, sizeof(buffer), "%.1f MB", static_cast<double>(bytes) / kMega);
-    } else {
-        std::snprintf(buffer, sizeof(buffer), "%llu bytes",
-                      static_cast<unsigned long long>(bytes));
-    }
-    return std::string(buffer);
-}
-
 }  // namespace
 
 void UiRenderer::render(UiState& state, const UiCallbacks& callbacks) {

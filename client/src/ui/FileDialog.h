@@ -25,4 +25,20 @@ bool openFileDialog(void* ownerWindow, SelectedFile& selected, std::string& erro
 bool saveFileDialog(void* ownerWindow, const std::string& defaultName, std::string& path,
                     std::string& error);
 
+// 전송 시작 확인 (design 88행 "전송시 전송을 할 것인지 물어보는 message box" — 유지 항목).
+//
+// [왜 확인을 받는가]
+//   500MB 전송은 실질적으로 되돌릴 수 없다. Cancel은 있지만 그 시점에 서버 세션 하나가
+//   이미 소비되고(1:1이라 그 사이 다른 클라이언트는 대기한다) 전송한 바이트는 버려진다.
+//   그래서 "무엇을 어디로" 둘 다 보여주고 시작 전에 한 번 묻는다.
+//
+// [모달이어도 되는 이유]
+//   전송 시작 전이라 진행 중인 작업이 없다. 파일 다이얼로그도 같은 방식으로 UI 스레드를
+//   막는다 — PDF가 금지하는 것은 "500MB 전송 중" 프리즈다.
+//
+// 사용자가 취소하면 false. 물어볼 수 없는 상황(대화상자 생성 실패)에서도 false를 돌려
+// 전송하지 않는다 — 확인받지 못했으면 보내지 않는 쪽이 안전하다.
+bool confirmUpload(void* ownerWindow, const std::string& fileName, std::uint64_t fileSize,
+                   const std::string& destination);
+
 }  // namespace client

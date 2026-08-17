@@ -14,6 +14,7 @@ set(COMMON_TESTS
     test_net.cpp
     test_client_scenarios.cpp
     test_ping_console.cpp
+    test_human_size.cpp
 )
 
 # 클라이언트 시나리오 테스트가 필요로 하는 client/ 소스 — GUI 의존이 없는 3개만 가져온다.

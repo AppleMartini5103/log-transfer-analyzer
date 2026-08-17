@@ -43,6 +43,13 @@ struct LogEntry {
     std::string text;  // "[YYYY-MM-DD HH:MM:SS] [Info] ..." 완성형 (컨벤션 8번 포맷)
 };
 
+// 바이트 수를 사람이 읽는 크기로 ("482.8 MB", "512 bytes").
+//
+// 여기에 두는 이유: 화면(파일 크기 표시)과 전송 확인 대화상자가 같은 파일을 두고 서로 다른
+// 숫자를 말하면 사용자가 어느 쪽을 믿어야 하는지 알 수 없다. 한 곳에서만 만든다.
+// MB = 1024x1024로 표기하는 것은 로그의 처리량 표기와도 같은 기준이다 (design 실측 절).
+std::string humanSize(std::uint64_t bytes);
+
 class UiState {
 public:
     // ImGui InputText가 직접 쓰는 버퍼 (std::string은 크기 변경을 다루기 번거롭다)
