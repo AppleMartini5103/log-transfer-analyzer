@@ -646,15 +646,23 @@ void TransferService::drainRing() {
 void TransferService::handle(const QuitCommand&) {
     _reader.abortUpload();
     _uploading = false;
-    if (_connectTimer) {
-        _connectTimer->stop();
-    }
+
+    // ★ 래퍼가 있는 핸들은 래퍼가 스스로 닫게 한다 — uv_walk에 맡기면 안 된다.
+    //   uv_walk의 콜백은 uv_close(handle, nullptr)로 닫는데, 콜백이 없으면 Timer::onCloseCb가
+    //   실행되지 않아 _closed가 false로 남는다. 그러면 나중에 ~Timer()가 "곧 올 close 콜백이
+    //   해제해 줄 것"이라 보고 release()로 소유권을 놓아버리고, 그 콜백은 영원히 오지 않아
+    //   uv_timer_t가 누수된다 (ASan 실측: 152바이트 x 세션 수).
+    //   여기서 먼저 파괴하면 ~Timer()가 uv_close(handle, onCloseCb)를 직접 걸고, 루프가 그
+    //   콜백을 처리하며 해제한다. 소켓도 같은 이유로 closeSocket()이 자기 규칙대로 닫는다.
+    _connectTimer.reset();
     closeSocket();
-    // 남은 핸들(async 등)을 모두 닫으면 uv_run이 반환한다 — uv_stop보다 정리가 확실하다.
+
+    // 남은 핸들(래퍼 없는 async 등)을 모두 닫으면 uv_run이 반환한다 — uv_stop보다 정리가 확실하다.
     ::uv_walk(&_loop, &TransferService::onWalkCloseCb, nullptr);
 }
 
 void TransferService::onWalkCloseCb(uv_handle_t* handle, void* /*arg*/) {
+    // 이미 닫히는 중인 핸들은 건드리지 않는다 — 위에서 래퍼가 자기 콜백으로 닫아둔 것들이다
     if (::uv_is_closing(handle) == 0) {
         ::uv_close(handle, nullptr);
     }
