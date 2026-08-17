@@ -43,9 +43,12 @@ private:
     void resizeIfRequested();
     void renderFrame();
 
-    // UI 콜백 배선 — 아직 네트워크가 없으므로 상태 전이와 로그만 담당한다.
-    // 다음 이슈에서 커맨드 큐 + uv_async_send로 루프 스레드에 넘기는 자리다 (design 7번).
     UiCallbacks makeCallbacks();
+
+    // 로그 파일 싱크를 연다. GUI 서브시스템이라 stdout이 버려지므로, 이걸 하지 않으면
+    // 컨벤션 8번이 요구하는 "연결·세션 상태 변경 기록"이 화면에만 남고 창을 닫으면 사라진다.
+    // 실패해도 앱은 계속 동작한다 (화면 로그는 여전히 남으므로) — 사유만 화면에 알린다.
+    void openLogFile();
 
     // 워커가 보낸 이벤트를 UiState에 반영한다 (매 프레임, UI 스레드에서만).
     void pumpWorkerEvents();

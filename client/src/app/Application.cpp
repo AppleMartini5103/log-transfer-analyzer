@@ -4,9 +4,12 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include <array>
+#include <filesystem>
 #include <fstream>
 
 #include "ui/FileDialog.h"
+#include "util/Logger.h"
 #include "util/Version.h"
 
 namespace {
@@ -44,6 +47,11 @@ Application::~Application() {
     if (_instance != nullptr) {
         ::UnregisterClassW(kWindowClassName, _instance);
     }
+
+    // 마지막 단계: 로그를 내려쓰고 파일을 닫는다 (design 10번 종료 시퀀스의 "로그 플러시").
+    // 워커·창이 정리되며 남긴 줄까지 파일에 들어가야 하므로 여기가 마지막이어야 한다.
+    common::Logger::instance().flush();
+    common::Logger::instance().close();
 }
 
 bool Application::initialize(HINSTANCE instance, std::string& error) {
@@ -70,6 +78,9 @@ bool Application::initialize(HINSTANCE instance, std::string& error) {
     _imguiInitialized = true;
     _uiCallbacks = makeCallbacks();
 
+    // UI가 준비된 뒤에 연다 — 실패 사유를 화면에 띄울 수단이 있어야 하기 때문이다.
+    openLogFile();
+
     // 워커는 UI가 준비된 뒤 띄운다 — 초기화 순서는 "표시 수단 -> 스레드"여야
     // 워커의 첫 에러도 화면에 남는다 (design 10번 초기화 순서와 같은 원칙).
     if (!_worker.start(error)) {
@@ -84,8 +95,29 @@ bool Application::initialize(HINSTANCE instance, std::string& error) {
     return true;
 }
 
-// 지금은 상태 전이와 로그만 한다. 네트워크가 붙는 다음 이슈에서 각 콜백이
-// 커맨드 큐 push + uv_async_send로 바뀐다 (design 7번: UI 스레드에서 uv_* 직접 호출 금지).
+void Application::openLogFile() {
+    // 실행 파일 옆에 쓴다 — 작업 디렉토리는 파일 다이얼로그 사용에 따라 바뀔 수 있어
+    // 로그가 어디에 생겼는지 예측할 수 없게 된다 (OFN_NOCHANGEDIR로 막아도 보장은 아니다).
+    std::array<wchar_t, MAX_PATH> modulePath{};
+    const DWORD length =
+        ::GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+    if (length == 0 || length >= modulePath.size()) {
+        _uiState.logWarn("Cannot resolve the executable path - file logging is disabled.");
+        return;
+    }
+
+    std::filesystem::path path(modulePath.data());
+    path.replace_filename(L"client.log");
+
+    // 서버와 같은 관례로 이어쓰기다 (Logger::openFile이 ios::app) — 실행 이력이 누적돼
+    // 채점 시 여러 번의 세션을 함께 확인할 수 있다.
+    if (!common::Logger::instance().openFile(path.string())) {
+        _uiState.logWarn("Cannot open " + path.string() + " - file logging is disabled.");
+        return;
+    }
+    _uiState.logInfo("Logging to " + path.string());
+}
+
 UiCallbacks Application::makeCallbacks() {
     UiCallbacks callbacks;
 
