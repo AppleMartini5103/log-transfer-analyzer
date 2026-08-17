@@ -4,6 +4,7 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include "ui/FileDialog.h"
 #include "util/Version.h"
 
 namespace {
@@ -61,10 +62,93 @@ bool Application::initialize(HINSTANCE instance, std::string& error) {
         return false;
     }
     _imguiInitialized = true;
+    _uiCallbacks = makeCallbacks();
+
+    _uiState.logInfo(std::string(common::kProjectName) + " client started (built " +
+                     std::string(common::buildDate()) + ")");
 
     ::ShowWindow(_hwnd, SW_SHOWDEFAULT);
     ::UpdateWindow(_hwnd);
     return true;
+}
+
+// 지금은 상태 전이와 로그만 한다. 네트워크가 붙는 다음 이슈에서 각 콜백이
+// 커맨드 큐 push + uv_async_send로 바뀐다 (design 7번: UI 스레드에서 uv_* 직접 호출 금지).
+UiCallbacks Application::makeCallbacks() {
+    UiCallbacks callbacks;
+
+    callbacks.onConnect = [this] {
+        std::uint16_t port = 0;
+        if (!_uiState.parsePort(port)) {
+            _uiState.logError("Port must be a number between 1 and 65535.");
+            return;
+        }
+        const std::string ip(_uiState.serverIp.data());
+        if (ip.empty()) {
+            _uiState.logError("Server IP is empty.");
+            return;
+        }
+        // 의도 상태만 바꾼다 — 실제 연결(LinkState)은 소켓 이벤트가 정한다 (design 12번).
+        _uiState.connectIntent = true;
+        _uiState.logInfo("Connect requested: " + ip + ":" + std::to_string(port) +
+                         " (networking lands in the next issue)");
+    };
+
+    callbacks.onDisconnect = [this] {
+        _uiState.connectIntent = false;
+        _uiState.link = LinkState::Disconnected;
+        _uiState.session = SessionState::Idle;
+        _uiState.uploadProgress = 0.0f;
+        _uiState.downloadProgress = 0.0f;
+        _uiState.logInfo("Disconnected by user.");
+    };
+
+    callbacks.onPing = [this] {
+        const std::string ip(_uiState.serverIp.data());
+        _uiState.logInfo("Ping requested" + (ip.empty() ? std::string{} : ": " + ip));
+    };
+
+    callbacks.onBrowse = [this] {
+        SelectedFile selected;
+        std::string error;
+        if (!openFileDialog(_hwnd, selected, error)) {
+            if (!error.empty()) {  // 비어 있으면 사용자가 취소한 것 — 로그를 남기지 않는다
+                _uiState.logError(error);
+            }
+            return;
+        }
+        _uiState.filePath = selected.path;
+        _uiState.fileName = selected.name;
+        _uiState.fileSize = selected.size;
+        _uiState.uploadProgress = 0.0f;
+        _uiState.logInfo("Selected " + selected.name + " (" + std::to_string(selected.size) +
+                         " bytes)");
+    };
+
+    callbacks.onSend = [this] {
+        _uiState.logInfo("Send requested for " + _uiState.fileName +
+                         " (transfer lands in the next issue)");
+    };
+
+    callbacks.onCancelUpload = [this] {
+        _uiState.session = SessionState::Idle;
+        _uiState.uploadProgress = 0.0f;
+        _uiState.logWarn("Upload cancelled by user.");
+    };
+
+    callbacks.onSaveResult = [this] {
+        std::string path;
+        std::string error;
+        if (!saveFileDialog(_hwnd, "result.csv", path, error)) {
+            if (!error.empty()) {
+                _uiState.logError(error);
+            }
+            return;
+        }
+        _uiState.logInfo("Result would be saved to " + path);
+    };
+
+    return callbacks;
 }
 
 bool Application::createWindow(HINSTANCE instance, std::string& error) {
@@ -146,14 +230,7 @@ void Application::renderFrame() {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    // 뼈대 단계의 자리표시자 — 다음 작업에서 UiRenderer(Connection/Transfer/Log)로 교체된다.
-    ImGui::Begin("log-transfer-analyzer");
-    ImGui::Text("Client skeleton is running.");
-    ImGui::Text("%.*s (built %.*s)", static_cast<int>(common::kProjectName.size()),
-                common::kProjectName.data(), static_cast<int>(common::buildDate().size()),
-                common::buildDate().data());
-    ImGui::Text("%.1f FPS", static_cast<double>(ImGui::GetIO().Framerate));
-    ImGui::End();
+    _uiRenderer.render(_uiState, _uiCallbacks);
 
     ImGui::Render();
 

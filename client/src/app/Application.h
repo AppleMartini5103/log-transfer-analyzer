@@ -6,6 +6,9 @@
 
 #include <string>
 
+#include "ui/UiRenderer.h"
+#include "ui/UiState.h"
+
 namespace client {
 
 // Win32 창 + D3D11 디바이스 + ImGui 컨텍스트의 수명을 소유하고 메인 루프를 돌린다.
@@ -39,11 +42,19 @@ private:
     void resizeIfRequested();
     void renderFrame();
 
+    // UI 콜백 배선 — 아직 네트워크가 없으므로 상태 전이와 로그만 담당한다.
+    // 다음 이슈에서 커맨드 큐 + uv_async_send로 루프 스레드에 넘기는 자리다 (design 7번).
+    UiCallbacks makeCallbacks();
+
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
     HWND _hwnd = nullptr;
     HINSTANCE _instance = nullptr;
     bool _imguiInitialized = false;
+
+    UiState _uiState;
+    UiRenderer _uiRenderer;
+    UiCallbacks _uiCallbacks;
 
     Microsoft::WRL::ComPtr<ID3D11Device> _device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> _deviceContext;

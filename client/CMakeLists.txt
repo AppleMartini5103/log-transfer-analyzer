@@ -16,6 +16,9 @@ set(IMGUI_SOURCES
 add_executable(client WIN32
     src/app/main.cpp
     src/app/Application.cpp
+    src/ui/FileDialog.cpp
+    src/ui/UiRenderer.cpp
+    src/ui/UiState.cpp
     ${IMGUI_SOURCES}
 )
 
