@@ -4,6 +4,9 @@
 #include "util/Logger.h"
 
 #include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <string>
 
 // 서버 진입점.
 // design 10번 초기화 순서 고정 — 이 순서를 바꾸면 자식 프로세스에서 데드락이 난다:
@@ -39,9 +42,21 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: daemonize: %s\n", error.c_str());
             return 1;
         }
-        // 이 시점부터 stdout은 /dev/null — 로그는 반드시 파일로 가야 한다
-        if (!common::Logger::instance().openFile(config.logPath)) {
+        // 이 시점부터 stdout은 /dev/null — 로그는 반드시 파일로 가야 한다.
+        // log_path는 "파일 경로"라는 config 의미를 유지하고, 실제 파일은 그 디렉토리 아래
+        // logs/<YYYYMMDD>/<파일명>에 놓인다 (design 14번) — config·README 호환을 깨지 않는다
+        const std::filesystem::path logPath{config.logPath};
+        const std::string logDir = logPath.parent_path().string();
+        const std::string logName =
+            logPath.filename().empty() ? std::string{"server.log"} : logPath.filename().string();
+        if (!common::Logger::instance().openFile(logDir, logName)) {
             return 1;  // 알릴 통로가 없다 (stderr도 /dev/null) — 종료 코드로만 보고
+        }
+        // 시작 시 보관 기간 정리 (design 14번). 주기 정리는 ServerApp의 03시 타이머가 담당
+        const std::size_t pruned = common::Logger::instance().pruneOldLogs(std::time(nullptr));
+        if (pruned > 0) {
+            common::Logger::instance().info("Pruned " + std::to_string(pruned) +
+                                            " expired log directory(ies) at startup");
         }
         std::string pidError;
         if (!server::app::writePidFile(server::app::kPidFilePath, pidError)) {

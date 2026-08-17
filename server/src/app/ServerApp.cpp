@@ -6,7 +6,9 @@
 
 #include <unistd.h>
 
+#include <array>
 #include <csignal>
+#include <ctime>
 #include <string>
 #include <utility>
 
@@ -81,7 +83,45 @@ bool ServerApp::init(std::string& error) {
         error = "listen on port " + std::to_string(_config.port) + ": " + uv_strerror(rc);
         return false;
     }
+
+    // 로그 정리 타이머 — 파일 싱크가 열려 있을 때만 (design 14번).
+    // 시작 시 정리는 main.cpp가 이미 했으므로 여기서는 주기 감시만 건다
+    if (!common::Logger::instance().activeFilePath().empty()) {
+        _pruneTimer = std::make_unique<common::net::Timer>(&_loop);
+        armPruneTimer();
+    }
     return true;
+}
+
+void ServerApp::armPruneTimer() {
+    if (!_pruneTimer) {
+        return;
+    }
+    constexpr std::uint64_t kPruneCheckIntervalMs = 60 * 60 * 1000;  // 1시간
+    _pruneTimer->start(kPruneCheckIntervalMs, [this] { onPruneTick(); });
+}
+
+void ServerApp::onPruneTick() {
+    const std::time_t now = std::time(nullptr);
+    // localtime_r — std::localtime은 정적 버퍼를 공유하는 재진입 불가 함수다. 이 콜백은 루프
+    // 스레드에서 돌지만 파서 스레드도 같은 프로세스에 있어, 공유 버퍼에 의존할 이유가 없다
+    std::tm local{};
+    if (::localtime_r(&now, &local) != nullptr && local.tm_hour == common::kLogPruneHour) {
+        std::array<char, 16> today{};
+        if (std::strftime(today.data(), today.size(), "%Y%m%d", &local) != 0 &&
+            _lastPruneDate != today.data()) {
+            _lastPruneDate.assign(today.data());
+            const std::size_t pruned = common::Logger::instance().pruneOldLogs(now);
+            if (pruned > 0) {
+                common::Logger::instance().info("Pruned " + std::to_string(pruned) +
+                                                " expired log directory(ies)");
+            }
+        }
+    }
+    // 재무장: Timer는 1회성이다. 콜백 안에서 start()를 다시 부르는 것이 안전한 이유는
+    // Timer::onTimeoutCb가 콜백의 "복사본"을 호출하기 때문 — 실행 중에 _callback을
+    // 덮어써도 지금 실행 중인 함수 객체는 살아 있다
+    armPruneTimer();
 }
 
 int ServerApp::run() {
@@ -134,6 +174,9 @@ void ServerApp::shutdown() {
     if (_sessions) {
         _sessions->close();
     }
+    // 로그 정리 타이머도 활성 핸들이다 — 놓지 않으면 uv_run이 영원히 반환하지 않는다.
+    // Timer 소멸자가 uv_close를 걸고 핸들 소유권을 close 콜백으로 넘긴다
+    _pruneTimer.reset();
     uv_signal_stop(&_sigterm);
     uv_signal_stop(&_sigint);
 

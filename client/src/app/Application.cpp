@@ -5,8 +5,10 @@
 #include "imgui_impl_win32.h"
 
 #include <array>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <string>
 
 #include "ui/FileDialog.h"
 #include "util/Logger.h"
@@ -106,16 +108,24 @@ void Application::openLogFile() {
         return;
     }
 
-    std::filesystem::path path(modulePath.data());
-    path.replace_filename(L"client.log");
+    // 실제 파일은 <실행 파일 디렉토리>/logs/<YYYYMMDD>/client.log에 놓인다 (design 14번)
+    const std::filesystem::path baseDir = std::filesystem::path{modulePath.data()}.parent_path();
 
     // 서버와 같은 관례로 이어쓰기다 (Logger::openFile이 ios::app) — 실행 이력이 누적돼
     // 채점 시 여러 번의 세션을 함께 확인할 수 있다.
-    if (!common::Logger::instance().openFile(path.string())) {
-        _uiState.logWarn("Cannot open " + path.string() + " - file logging is disabled.");
+    if (!common::Logger::instance().openFile(baseDir.string(), "client.log")) {
+        _uiState.logWarn("Cannot open a log file under " + baseDir.string() +
+                         "\\logs - file logging is disabled.");
         return;
     }
-    _uiState.logInfo("Logging to " + path.string());
+    _uiState.logInfo("Logging to " + common::Logger::instance().activeFilePath());
+
+    // 보관 기간 정리는 시작 시 한 번만 한다 — 03시 타이머는 서버 몫이다 (design 14번:
+    // 클라이언트는 사용자가 열고 닫는 GUI라 새벽 3시에 켜져 있을 일이 거의 없다)
+    const std::size_t pruned = common::Logger::instance().pruneOldLogs(std::time(nullptr));
+    if (pruned > 0) {
+        _uiState.logInfo("Removed " + std::to_string(pruned) + " expired log folder(s)");
+    }
 }
 
 UiCallbacks Application::makeCallbacks() {
