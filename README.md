@@ -78,7 +78,10 @@ kill $(cat server.pid)                     # graceful shutdown
 | `-c CONFIG` | Config file (default `./server.conf`; absent file is not an error) |
 
 Artifacts are written relative to the working directory: `result.csv`, `skip_report.txt`,
-`server.log` (daemon mode), `server.pid` (daemon mode).
+`logs/<YYYYMMDD>/server.log` (daemon mode), `server.pid` (daemon mode). The log lives under a
+dated directory because a daemon runs for days: the active file keeps a fixed name so `tail -f`
+stays predictable, rotated files get a numeric suffix, and directories older than the retention
+window are pruned.
 
 The optional config file is plain `key=value` with `#` comments. It exists for benchmarking and
 log placement only — protocol constants are never configurable, so a config file can never make
@@ -87,7 +90,7 @@ the client and server disagree:
 ```ini
 chunk_size=65536        # receive/ring slot size (4 KB - 1 MB)
 snd_buf_size=0          # SO_SNDBUF; 0 keeps kernel autotuning
-log_path=./server.log
+log_path=./server.log   # base directory + file name; the file lands in <dir>/logs/<YYYYMMDD>/
 ```
 
 Precedence is *built-in defaults < config file < command line*, so a benchmark sweep can change
@@ -362,7 +365,7 @@ A label line such as `[Task 1]` was rejected precisely because it breaks CSV par
 ## 7. Tests
 
 ```bash
-ctest --test-dir build --output-on-failure          # 139 unit tests
+ctest --test-dir build --output-on-failure          # 165 unit tests
 python3 tests/e2e/run_e2e.py --server build/server/server
 python3 tests/perf/sweep.py  --server build/server/server
 ```
@@ -370,7 +373,7 @@ python3 tests/perf/sweep.py  --server build/server/server
 The end-to-end driver and the benchmark sweep use the Python standard library only — no
 installation step.
 
-**Unit tests (Catch2, 139 cases / 4,691 assertions)** cover the CRC vector
+**Unit tests (Catch2, 165 cases / 4,916 assertions)** cover the CRC vector
 (`"123456789"` → `0xCBF43926`), codec round trips including every truncation point, framer
 accumulation, SPSC ring behaviour under two-thread contention, each validation stage with its own
 damaged-line fixture, and the session state machine driven over real loopback sockets.
