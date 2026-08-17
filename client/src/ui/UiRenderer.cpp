@@ -89,10 +89,6 @@ void UiRenderer::render(UiState& state, const UiCallbacks& callbacks) {
     renderLogPanel(state);
 
     ImGui::End();
-
-    // 진단 창은 메인 창 밖에 띄운다 — 사용자가 옮기고 닫을 수 있어야 하고,
-    // 메인 화면 배치를 밀어내지 않아야 한다 (design 12번: 콘솔풍 별도 창)
-    renderPingWindow(state);
 }
 
 void UiRenderer::renderServerRow(UiState& state, const UiCallbacks& callbacks) {
@@ -207,52 +203,6 @@ void UiRenderer::renderTransferRow(UiState& state, const UiCallbacks& callbacks)
         ImGui::SameLine();
         ImGui::TextDisabled("- result.csv received; Save needs no connection");
     }
-}
-
-// ICMP 진단 출력 — ping.exe처럼 줄이 쌓이는 콘솔 모양 (design 12번).
-//
-// 왜 별도 창인가: 진단은 "연결이 안 될 때 원인을 가르는" 도구라 세션 로그와 함께 읽을 일이
-// 많다. 메인 화면 안에 넣으면 Log 창을 밀어내고, 로그와 섞으면 둘 다 읽기 어려워진다.
-void UiRenderer::renderPingWindow(UiState& state) {
-    if (!state.pingWindowOpen) {
-        return;
-    }
-
-    // 크기·위치는 첫 표시 때만 정하고 이후에는 사용자가 옮긴 자리를 존중한다(FirstUseEver).
-    //
-    // 위치를 Server/Transfer 줄 아래로 내려놓는 이유: 진단 중에 사용자가 다시 만지는 것은
-    // IP 입력칸과 Ping 버튼이다. 그 위를 덮으면 주소를 바꿔 다시 시도할 때마다 창을 밀어야 한다.
-    // 메인 창(클라이언트 영역 약 984x661) 안에 여유를 두고 들어가는 크기로 잡는다 —
-    // ImGui 창은 부모 OS 창 경계를 넘지 못하므로(참고: verification_tool도 단일 OS 창 구조)
-    // 너무 크게 잡으면 옮길 여지가 사라진다.
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 180.0f, viewport->WorkPos.y + 220.0f),
-                            ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(760.0f, 400.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Ping diagnostic", &state.pingWindowOpen)) {
-        ImGui::End();  // 접혀 있어도 End는 짝을 맞춰야 한다
-        return;
-    }
-
-    if (ImGui::Button("Clear")) {
-        state.clearPingLines();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("network-layer reachability (Connect tests the TCP port)");
-
-    ImGui::Separator();
-    ImGui::BeginChild("ping-output", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_HorizontalScrollbar);
-    for (const std::string& line : state.pingLines()) {
-        ImGui::TextUnformatted(line.c_str());
-    }
-    // 새 줄이 들어온 프레임에만 맨 아래로 — 매 프레임 하면 사용자가 위로 스크롤할 수 없다
-    if (state.pingDirty()) {
-        ImGui::SetScrollHereY(1.0f);
-        state.clearPingDirty();
-    }
-    ImGui::EndChild();
-    ImGui::End();
 }
 
 void UiRenderer::renderLogPanel(UiState& state) {

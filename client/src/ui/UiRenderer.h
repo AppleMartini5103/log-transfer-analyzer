@@ -31,7 +31,6 @@ private:
     void renderServerRow(UiState& state, const UiCallbacks& callbacks);
     void renderTransferRow(UiState& state, const UiCallbacks& callbacks);
     void renderLogPanel(UiState& state);
-    void renderPingWindow(UiState& state);
 };
 
 }  // namespace client

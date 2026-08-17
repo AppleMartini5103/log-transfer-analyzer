@@ -17,9 +17,9 @@ add_executable(client WIN32
     src/app/main.cpp
     src/app/Application.cpp
     src/service/FileReader.cpp
-    src/service/IcmpPing.cpp
     src/service/TransferService.cpp
     src/ui/FileDialog.cpp
+    src/ui/PingConsole.cpp
     src/ui/UiRenderer.cpp
     src/ui/UiState.cpp
     ${IMGUI_SOURCES}
@@ -36,7 +36,7 @@ target_include_directories(client PRIVATE
 )
 
 # d3d11/dxgi: DX11 백엔드. common: 프로토콜·소켓·CRC·링버퍼(서버와 공유).
-target_link_libraries(client PRIVATE common d3d11 dxgi iphlpapi)
+target_link_libraries(client PRIVATE common d3d11 dxgi)
 
 # libuv는 DLL로 빌드되므로 실행 파일 옆에 uv.dll이 있어야 한다 (없으면 0xC0000135).
 add_custom_command(TARGET client POST_BUILD

@@ -38,14 +38,6 @@ std::string formatRate(std::uint64_t bytes, std::uint64_t elapsedNs) {
     return std::string{buffer.data()};
 }
 
-// 진단 한 줄. 회당 통지(스레드풀)와 요약 계산(루프 스레드)이 같은 문구를 써야 하므로 한 곳에 둔다.
-std::string pingReplyLine(const PingReply& reply) {
-    if (!reply.success) {
-        return reply.detail;  // "request timed out" 등 사유가 그대로 한 줄이 된다
-    }
-    return "reply from " + reply.detail + ": time=" + std::to_string(reply.roundTripMs) + "ms";
-}
-
 }  // namespace
 
 // 소켓 이벤트를 서비스로 되돌리는 옵저버. 기본 구현이 빈 몸체라 필요한 것만 오버라이드한다.
@@ -696,97 +688,6 @@ void TransferService::drainRing() {
     _reader.notifySpaceAvailable();
 }
 
-void TransferService::handle(const PingCommand& command) {
-    if (command.ip.empty()) {
-        pushLog(common::LogLevel::Warn, "Ping: enter the server IP first.");
-        return;
-    }
-    if (_pingRunning) {
-        // 거절하고 알린다 — 조용히 무시하면 버튼이 고장난 것처럼 보인다 (컨벤션 8번)
-        pushLog(common::LogLevel::Warn, "Ping: a diagnostic is already running.");
-        return;
-    }
-
-    _pingRunning = true;
-    _pingTarget = command.ip;
-    _pingOutcome = PingOutcome{};
-    _pingWork.data = this;
-
-    pushPingLine("--- ping " + _pingTarget + " (" + std::to_string(kDefaultPingAttempts) +
-                 " attempts) ---");
-
-    const int result = ::uv_queue_work(&_loop, &_pingWork, &TransferService::onPingWorkCb,
-                                       &TransferService::onPingDoneCb);
-    if (result < 0) {
-        _pingRunning = false;
-        pushLog(common::LogLevel::Error,
-                std::string("Ping: uv_queue_work failed: ") + ::uv_strerror(result));
-    }
-}
-
-// libuv 스레드풀에서 실행된다 — 소켓·uv 핸들·UiState는 절대 만지지 않는다.
-// 읽는 것은 _pingTarget, 쓰는 것은 _pingOutcome뿐이고, 단일 in-flight 규칙이 그 둘의
-// 배타 접근을 보장한다 (헤더의 근거 참조).
-//
-// pushPingLine을 이 스레드에서 부르는 것은 규칙 위반이 아니다: 그 경로는 뮤텍스로 보호된
-// 이벤트 큐에 넣기만 하고 libuv API를 쓰지 않는다 — design 7번이 그 큐를 "스레드를 건너는
-// 통로"로 정의했다. 회당 즉시 내보내야 응답이 없을 때(회당 1초) 화면이 4초간 비지 않는다.
-void TransferService::onPingWorkCb(uv_work_t* request) {
-    auto* self = static_cast<TransferService*>(request->data);
-    if (self == nullptr) {
-        return;
-    }
-    self->_pingOutcome = icmpPing(self->_pingTarget, kDefaultPingAttempts,
-                                  [self](const PingReply& reply) {
-                                      self->pushPingLine(pingReplyLine(reply));
-                                  });
-}
-
-// 루프 스레드로 돌아온다 — 여기서부터 이벤트 큐를 써도 안전하다.
-void TransferService::onPingDoneCb(uv_work_t* request, int status) {
-    auto* self = static_cast<TransferService*>(request->data);
-    if (self == nullptr) {
-        return;
-    }
-    self->_pingRunning = false;
-
-    if (status == UV_ECANCELED) {
-        self->pushPingLine("ping cancelled");
-        return;
-    }
-    const PingOutcome& outcome = self->_pingOutcome;
-    if (!outcome.supported || !outcome.error.empty()) {
-        self->pushPingLine(outcome.error.empty() ? "ping unavailable" : outcome.error);
-        // 로그 창에도 남긴다 — 진단 창을 닫아둔 사용자도 실패를 알아야 한다
-        self->pushLog(common::LogLevel::Warn, "Ping failed: " + outcome.error);
-        return;
-    }
-
-    // 회별 줄은 스레드풀에서 이미 내보냈다 (onPingWorkCb의 sink). 여기서는 집계만 한다 —
-    // 다시 내보내면 같은 줄이 두 번 뜬다
-    std::size_t succeeded = 0;
-    std::uint32_t totalMs = 0;
-    for (const PingReply& reply : outcome.replies) {
-        if (reply.success) {
-            ++succeeded;
-            totalMs += reply.roundTripMs;
-        }
-    }
-
-    const std::size_t attempted = outcome.replies.size();
-    std::string summary = std::to_string(succeeded) + "/" + std::to_string(attempted) +
-                          " replies";
-    if (succeeded > 0) {
-        summary += ", avg " + std::to_string(totalMs / succeeded) + "ms";
-    }
-    self->pushPingLine("--- " + summary + " ---");
-
-    // 요약은 로그 창에도 남긴다 — 진단 결과는 "연결 실패 원인"을 판단하는 근거라
-    // 세션 로그와 같은 시간축에 있어야 나중에 추적할 수 있다 (컨벤션 8번)
-    self->pushLog(succeeded > 0 ? common::LogLevel::Info : common::LogLevel::Warn,
-                  "Ping " + self->_pingTarget + ": " + summary);
-}
-
 void TransferService::handle(const QuitCommand&) {
     _reader.abortUpload();
     _uploading = false;
@@ -800,13 +701,6 @@ void TransferService::handle(const QuitCommand&) {
     //   콜백을 처리하며 해제한다. 소켓도 같은 이유로 closeSocket()이 자기 규칙대로 닫는다.
     _connectTimer.reset();
     closeSocket();
-
-    // 진행 중인 ICMP 진단을 취소 시도한다 → 근거: 아직 스레드풀에 들어가지 않았으면 즉시
-    // 취소되고, 이미 실행 중이면 취소되지 않아 uv_run이 그 작업을 기다린다(회당 1초 x 4회
-    // 상한이라 유계다). 취소를 시도하지 않으면 그 대기가 항상 발생한다.
-    if (_pingRunning) {
-        ::uv_cancel(reinterpret_cast<uv_req_t*>(&_pingWork));
-    }
 
     // 남은 핸들(래퍼 없는 async 등)을 모두 닫으면 uv_run이 반환한다 — uv_stop보다 정리가 확실하다.
     ::uv_walk(&_loop, &TransferService::onWalkCloseCb, nullptr);
@@ -834,12 +728,6 @@ void TransferService::pushLog(common::LogLevel level, std::string message) {
     Event event;
     event.level = level;
     event.message = std::move(message);
-    pushEvent(std::move(event));
-}
-
-void TransferService::pushPingLine(std::string line) {
-    Event event;
-    event.pingLine = std::move(line);
     pushEvent(std::move(event));
 }
 

@@ -65,18 +65,6 @@ void UiState::log(common::LogLevel level, const std::string& message) {
     common::Logger::instance().log(level, message);
 }
 
-void UiState::appendPingLine(const std::string& line) {
-    _pingLines.push_back(line);
-    while (_pingLines.size() > kMaxPingLines) {
-        _pingLines.pop_front();
-    }
-    _pingDirty = true;
-
-    // 파일 싱크에는 남기지 않는다 → 근거: 진단 원문은 화면에서 즉시 보는 용도이고, 파일에는
-    // onPingDoneCb가 요약("Ping <ip>: 4/4 replies, avg 1ms")을 로그로 남긴다. 원문까지 파일에
-    // 넣으면 Ping을 누를 때마다 세션 로그가 진단 줄에 묻힌다 (컨벤션 8번의 핫 패스 금지와 같은 취지).
-}
-
 bool UiState::parsePort(std::uint16_t& port) const {
     const char* begin = serverPort.data();
     const char* end = begin + std::strlen(begin);

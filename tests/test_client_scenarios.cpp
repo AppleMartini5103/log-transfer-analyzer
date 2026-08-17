@@ -304,9 +304,6 @@ struct Harness {
                     ++errorLogs;
                 }
             }
-            if (!event.pingLine.empty()) {
-                pingLines.push_back(event.pingLine);
-            }
         }
     }
 
@@ -331,25 +328,6 @@ struct Harness {
             }
         }
         return false;
-    }
-
-    bool sawPing(const std::string& needle) {
-        absorb();
-        for (const auto& line : pingLines) {
-            if (line.find(needle) != std::string::npos) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    std::string allPingLines() {
-        absorb();
-        std::string joined;
-        for (const auto& line : pingLines) {
-            joined += "\n    " + line;
-        }
-        return joined;
     }
 
     // 실패 시 무슨 일이 있었는지 보이게 한다 — 상태값만 보면 원인 추적이 불가능하다
@@ -442,7 +420,6 @@ struct Harness {
     float uploadProgress = 0.0f;
     int errorLogs = 0;
     std::deque<std::string> logs;
-    std::deque<std::string> pingLines;
     std::deque<LinkState> linkHistory;
     std::deque<SessionState> sessionHistory;
     bool _ownsFile = true;
@@ -617,54 +594,6 @@ TEST_CASE("client scenario: the result stays saveable after the server closes") 
     REQUIRE(ui.canConnect());                           // 다시 붙는 것도 열려 있다
     REQUIRE_FALSE(ui.canSend());                        // 연결이 없으니 Send는 잠긴다
     REQUIRE_FALSE(ui.canDisconnect());
-}
-
-// ── ICMP 진단 (design 12번, 커밋 [42]) ──────────────────────────────────────
-//
-// ICMP 자체의 응답 내용은 환경(방화벽·라우팅)에 좌우되므로 단정하지 않는다. 여기서 고정하는
-// 것은 배선이다: 커맨드 큐 → 루프 스레드 → uv_queue_work(스레드풀) → 이벤트 큐 → UI.
-// 이 경로가 끊기면 버튼을 눌러도 아무 일이 없고, 그건 조용히 지나가기 쉬운 고장이다.
-
-TEST_CASE("client scenario: ping routes through the worker and reports back") {
-    Harness harness;
-
-    // 루프백은 어느 환경에서나 응답한다 — Windows에서는 실제 ICMP가 돌고,
-    // Linux 빌드에서는 스텁이 "미지원"을 돌려준다. 어느 쪽이든 결과가 UI까지 와야 한다.
-    harness.service.post(client::PingCommand{"127.0.0.1"});
-
-    // 시작 줄은 루프 스레드가 즉시 남긴다 (스레드풀 결과를 기다리지 않는다)
-    REQUIRE(harness.waitFor([&] { return harness.sawPing("--- ping 127.0.0.1"); }));
-    // 그리고 스레드풀 작업이 끝나면 마무리 줄이 온다
-    REQUIRE(harness.waitFor([&] { return harness.pingLines.size() >= 2; }, 30000));
-    INFO("ping output:" << harness.allPingLines());
-
-#ifdef _WIN32
-    REQUIRE(harness.sawPing("---"));            // 요약 줄 (n/m replies)
-    REQUIRE(harness.sawLog("Ping 127.0.0.1"));  // 요약은 세션 로그에도 남는다
-#else
-    REQUIRE(harness.sawPing("Windows client only"));  // 스텁이 미지원을 명시한다
-#endif
-}
-
-TEST_CASE("client scenario: ping rejects an empty address instead of doing nothing") {
-    Harness harness;
-    harness.service.post(client::PingCommand{""});
-
-    // 조용히 무시하면 버튼이 고장난 것처럼 보인다 — 사유를 알려야 한다 (컨벤션 8번)
-    REQUIRE(harness.waitFor([&] { return harness.sawLog("enter the server IP first"); }));
-}
-
-TEST_CASE("client scenario: quitting during a ping does not hang the shutdown") {
-    // uv_queue_work는 이미 시작된 작업을 취소할 수 없다. 그래서 종료가 그 작업을 기다리는데,
-    // ICMP는 회당 1초 x 4회로 유계다. 이 테스트는 그 대기가 "유계"임을 확인한다 —
-    // 무한정 걸리면 타임아웃으로 죽는다.
-    Harness harness;
-    harness.service.post(client::PingCommand{"127.0.0.1"});
-    REQUIRE(harness.waitFor([&] { return harness.sawPing("--- ping"); }));
-
-    harness.service.stop();
-    harness.service.stop();  // 여러 번 불러도 안전해야 한다
-    SUCCEED("stop() returned while a ping was in flight");
 }
 
 TEST_CASE("client scenario: quitting mid-upload joins every thread cleanly") {

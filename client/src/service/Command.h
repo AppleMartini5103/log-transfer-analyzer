@@ -33,18 +33,11 @@ struct StartUploadCommand {
 // 사용자 취소. 소켓 에러·타임아웃과 같은 CLEANUP 경로로 수렴한다 (design 7번).
 struct CancelUploadCommand {};
 
-// ICMP 진단 (design 12번). 연결 상태와 무관하게 언제든 보낼 수 있다 —
-// 오히려 연결이 안 될 때가 이 진단이 필요한 시점이다.
-// ICMP 호출이 블로킹이라 루프 스레드에서 직접 부를 수 없어, 루프가 받아 uv_queue_work로 넘긴다.
-struct PingCommand {
-    std::string ip;
-};
-
 // 종료도 같은 통로로 보낸다: UI 스레드에서 uv_stop을 직접 부르는 것보다
 // 루프가 스스로 핸들을 닫고 uv_run을 반환하는 편이 정리 순서가 깔끔하다 (design 7번).
 struct QuitCommand {};
 
 using Command = std::variant<ConnectCommand, DisconnectCommand, StartUploadCommand,
-                             CancelUploadCommand, PingCommand, QuitCommand>;
+                             CancelUploadCommand, QuitCommand>;
 
 }  // namespace client

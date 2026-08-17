@@ -72,17 +72,6 @@ public:
     bool logDirty() const { return _logDirty; }
     void clearLogDirty() { _logDirty = false; }
 
-    // ICMP 진단 출력 (design 12번의 콘솔풍 창). 세션 로그와 분리해 모아 보여준다 —
-    // 진단은 "지금 이 문제"를 보는 것이고 세션 로그는 이력이라 섞으면 둘 다 읽기 어렵다.
-    void appendPingLine(const std::string& line);
-    const std::deque<std::string>& pingLines() const { return _pingLines; }
-    bool pingDirty() const { return _pingDirty; }
-    void clearPingDirty() { _pingDirty = false; }
-    void clearPingLines() { _pingLines.clear(); }
-
-    // 진단 창을 띄울지. Ping을 누르면 열리고 사용자가 닫을 수 있다
-    bool pingWindowOpen = false;
-
     // 게이팅 판정 — design 12번 컨트롤 활성 매트릭스를 한곳에서만 계산한다.
     // 화면 여기저기에 조건을 흩뿌리면 상태가 늘 때 반드시 어긋난다.
     bool canEditAddress() const;
@@ -100,15 +89,8 @@ private:
     // 로그 창은 bounded — 장시간 켜둬도 메모리가 늘지 않는다 (컨벤션 1번 "모든 버퍼 bounded")
     static constexpr std::size_t kMaxLogEntries = 1000;
 
-    // 진단 출력도 bounded — 반복 실행해도 메모리가 늘지 않는다 (컨벤션 1번).
-    // 4회 시도 x 시작·요약 2줄이라 한 번에 6줄이고, 최근 몇 회분만 보이면 충분하다
-    static constexpr std::size_t kMaxPingLines = 200;
-
     std::deque<LogEntry> _logEntries;
     bool _logDirty = false;  // 새 줄이 들어오면 스크롤을 맨 아래로 내리기 위한 신호
-
-    std::deque<std::string> _pingLines;
-    bool _pingDirty = false;
 };
 
 }  // namespace client

@@ -13,6 +13,7 @@ set(COMMON_TESTS
     test_logger.cpp
     test_net.cpp
     test_client_scenarios.cpp
+    test_ping_console.cpp
 )
 
 # 클라이언트 시나리오 테스트가 필요로 하는 client/ 소스 — GUI 의존이 없는 3개만 가져온다.
@@ -27,7 +28,6 @@ set(COMMON_TESTS
 set(CLIENT_SOURCES
     ${CMAKE_SOURCE_DIR}/client/src/service/TransferService.cpp
     ${CMAKE_SOURCE_DIR}/client/src/service/FileReader.cpp
-    ${CMAKE_SOURCE_DIR}/client/src/service/IcmpPing.cpp
     ${CMAKE_SOURCE_DIR}/client/src/ui/UiState.cpp
 )
 
@@ -46,8 +46,7 @@ set(SERVER_TESTS
 
 if(WIN32)
     add_executable(unit_tests ${COMMON_TESTS} ${CLIENT_SOURCES})
-    # iphlpapi: IcmpPing.cpp의 IcmpSendEcho 계열 (Linux에서는 그 코드가 컴파일되지 않아 불필요)
-    target_link_libraries(unit_tests PRIVATE common ${CATCH2_LIB} iphlpapi)
+    target_link_libraries(unit_tests PRIVATE common ${CATCH2_LIB})
 else()
     add_executable(unit_tests ${COMMON_TESTS} ${SERVER_TESTS} ${CLIENT_SOURCES})
     target_link_libraries(unit_tests PRIVATE server_core common ${CATCH2_LIB})
