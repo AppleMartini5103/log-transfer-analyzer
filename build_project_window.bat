@@ -13,6 +13,23 @@ echo ========================================
 echo log-transfer-analyzer Build (Windows)
 echo ========================================
 
+REM 환경 가드: 이 스크립트는 개발자 명령 프롬프트에서 실행해야 한다.
+REM 일반 프롬프트에서는 cl.exe가 PATH에 없어 3rdparty 빌드가 엉뚱하게 실패한다.
+where cl >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo [ERROR] MSVC compiler ^(cl.exe^) not found in PATH.
+    echo         Run this script from:
+    echo           "x64 Native Tools Command Prompt for VS 2022"
+    echo         Requires MSVC 2019 16.4+ ^(std::from_chars for floating point^).
+    echo.
+    exit /b 1
+)
+
+if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
+    echo [WARN] Only x64 has been verified; detected %PROCESSOR_ARCHITECTURE%. Continuing...
+)
+
 echo [1/3] Checking 3rdparty libraries...
 for %%L in (libuv catch2) do (
     if not exist "3rdparty\%%L\include" (
