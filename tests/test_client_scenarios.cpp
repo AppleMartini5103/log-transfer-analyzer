@@ -23,9 +23,16 @@
 
 #include <catch_amalgamated.hpp>
 
+#ifdef _WIN32
+#include <process.h>  // _getpid
+#else
+#include <unistd.h>  // getpid
+#endif
+
 #include <algorithm>
 #include <cstdio>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -221,6 +228,48 @@ private:
     bool _responded = false;
 };
 
+// 픽스처 디렉토리 — OS 임시 디렉토리 아래에 프로세스 전용으로 만든다.
+// → 왜 실행 디렉토리가 아닌가: 이 파일들은 최대 32MB다. 저장소 루트에서 테스트를 돌리면
+//   루트에 32MB 바이너리가 생기고, 프로세스가 비정상 종료하면(크래시·Ctrl-C·새니타이저
+//   중단) 소멸자가 돌지 않아 그대로 남는다. .gitignore에 없으면 커밋 후보로 올라오고,
+//   실제로 이슈 46의 SIGPIPE 즉사가 34MB를 루트에 남겼다. 산출물의 위치는 테스트가
+//   책임질 몫이며, 임시 파일은 OS 임시 디렉토리에 두는 것이 그 답이다.
+// → 이름에 PID를 붙이는 이유: 같은 머신에서 두 실행이 겹쳐도 서로의 픽스처를 지우지 않는다.
+struct FixtureDir {
+    FixtureDir() {
+        std::error_code ec;
+        path = std::filesystem::temp_directory_path(ec) /
+               ("byda-client-tests-" + std::to_string(currentProcessId()));
+        std::filesystem::create_directories(path, ec);
+        REQUIRE_FALSE(ec);
+    }
+
+    ~FixtureDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);  // 실패는 삼킨다 — 임시 디렉토리는 OS가 정리한다
+    }
+
+    static long currentProcessId() {
+#ifdef _WIN32
+        return static_cast<long>(::_getpid());
+#else
+        return static_cast<long>(::getpid());
+#endif
+    }
+
+    std::filesystem::path path;
+};
+
+// 프로세스 수명 동안 하나 — 종료 시 디렉토리째 삭제된다.
+const std::filesystem::path& fixtureDir() {
+    static FixtureDir dir;
+    return dir.path;
+}
+
+std::string fixturePath(const std::string& name) {
+    return (fixtureDir() / name).string();
+}
+
 // 업로드용 임시 파일. 내용은 검증 대상이 아니므로(서버가 바이트만 센다) 단순 패턴으로 채운다.
 std::string writeTempFile(const std::string& path, std::size_t bytes) {
     std::ofstream out{path, std::ios::binary | std::ios::trunc};
@@ -242,7 +291,7 @@ std::string writeTempFile(const std::string& path, std::size_t bytes) {
 struct SharedLargeFile {
     SharedLargeFile() { writeTempFile(path, kLargeUpload); }
     ~SharedLargeFile() { std::remove(path.c_str()); }
-    std::string path = "client_scenario_large.bin";
+    std::string path = fixturePath("client_scenario_large.bin");
 };
 
 const std::string& largeUploadPath() {
@@ -425,7 +474,7 @@ struct Harness {
     TransferService service;
 
     std::size_t uploadBytes = kSmallUpload;
-    std::string filePath = "client_scenario_upload.bin";
+    std::string filePath = fixturePath("client_scenario_upload.bin");
 
     LinkState link = LinkState::Disconnected;
     SessionState session = SessionState::Idle;

@@ -74,6 +74,10 @@ server.pid
 result.csv
 server.conf
 
+# 테스트 픽스처는 OS 임시 디렉토리에 만들지만(tests/test_client_scenarios.cpp), 비정상
+# 종료로 남은 구버전 잔여물이 커밋 후보로 올라오지 않도록 안전망을 둔다 (이슈 48)
+client_scenario_*.bin
+
 # Claude Code local settings (per-machine, never shared)
 .claude/
 
