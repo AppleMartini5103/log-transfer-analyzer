@@ -62,18 +62,26 @@ public:
     void onRead(std::string_view data) override { _service.onBytes(data); }
 
     void onError(int status, std::string_view where) override {
+        // 진행 중인 세션이 있는가 — 업로드 중이거나, 업로드는 끝났지만 서버 응답을 기다리는 중
+        // (WAIT_ACK / WAIT_RESULT / RECEIVING_RESULT). 정상 완료 시 _expecting은 Nothing으로
+        // 되돌아가므로 이 하나로 "아직 끝나지 않은 세션"을 판별할 수 있다.
+        const bool sessionInFlight =
+            _service._uploading || _service._expecting != TransferService::Expecting::Nothing;
+
         // EOF는 세 가지 의미가 될 수 있어 구분해 표기한다 (design 12번):
-        //  ① 세션 완료 후    → 프로토콜의 정상 종료 (Info)
-        //  ② 전송 전 유휴    → 서버의 WAIT_HEADER 타임아웃 정리 (Warn — 사용자 잘못은 아니지만
-        //                       다음 Send가 재연결로 이어진다는 점을 알려야 한다)
-        //  ③ 업로드 중       → 실패 (아래 abortUpload가 Error로 남긴다)
+        //  ① 세션 완료 후      → 프로토콜의 정상 종료 (Info)
+        //  ② 세션 진행 중      → 실패. 사유는 아래 실패 경로가 Error로 남긴다
+        //  ③ 그 밖(유휴)       → 서버의 WAIT_HEADER 타임아웃 정리 (Warn — 사용자 잘못은
+        //                         아니지만 다음 Send가 재연결로 이어진다는 점을 알려야 한다)
         if (status == UV_EOF) {
             if (_service._sessionCompleted) {
                 _service.pushLog(common::LogLevel::Info, "Server closed the connection.");
-            } else {
+            } else if (!sessionInFlight) {
                 _service.pushLog(common::LogLevel::Warn,
                                  "Server closed the connection (idle timeout).");
             }
+            // 진행 중이었다면 여기서 "유휴 정리"로 적지 않는다 — 결과를 기다리다 끊긴 것을
+            // 유휴로 표기하면 화면이 거짓말을 한다 (컨벤션 8번: 조용한/틀린 상태 표기 금지)
         } else {
             _service.pushLog(common::LogLevel::Error,
                              std::string(where) + ": " + ::uv_strerror(status));
@@ -81,6 +89,14 @@ public:
 
         if (_service._uploading) {
             _service.abortUpload("Upload aborted: the connection was lost.",
+                                 common::LogLevel::Error);
+        } else if (_service._expecting != TransferService::Expecting::Nothing) {
+            // ★ 업로드는 끝났는데 Ack·결과를 기다리다 끊긴 경로. 이걸 빠뜨리면 session이
+            //   WaitAck/WaitResult에 남는다. 그 상태는 UiState의 isBusy()에 해당하므로
+            //   link는 Disconnected인데 session은 "바쁨"인 조합이 되어 canConnect()·
+            //   canDisconnect()·canSend()가 모두 false가 된다 — 어떤 버튼도 눌리지 않아
+            //   사용자가 앱을 재시작하는 수밖에 없다 (test_client_scenarios에서 재현·고정).
+            _service.failSession("The connection was lost before the result arrived.",
                                  common::LogLevel::Error);
         }
         _service.pushLink(LinkState::Disconnected);
@@ -256,6 +272,23 @@ void TransferService::handle(const DisconnectCommand&) {
         return;
     }
     pushLog(common::LogLevel::Info, "Disconnecting.");
+
+    // ★ 진행 중인 세션이 있으면 Cancel·에러와 같은 CLEANUP 경로로 보낸다 (design 7번).
+    //   소켓만 닫으면 안 되는 이유: 우리가 스스로 닫은 경우 libuv는 읽기 에러 콜백을
+    //   부르지 않으므로 onError의 정리 코드가 실행되지 않는다. 그러면 _uploading과 세션
+    //   상태가 그대로 남아, link는 Disconnected인데 session은 Streaming/WaitResult인
+    //   조합이 된다 — UiState의 isBusy()에 걸려 Connect·Disconnect·Send가 전부 잠기고
+    //   사용자가 앱을 재시작하는 수밖에 없다.
+    //   (미완료 쓰기가 에러로 돌아오면 우연히 정리되기도 해서 간헐적으로만 재현됐다.
+    //    test_client_scenarios의 "disconnect during an upload"가 이걸 고정한다.)
+    if (_uploading) {
+        abortUpload("Upload stopped: disconnected by user.", common::LogLevel::Warn);
+        return;  // abortUpload가 closeSocket과 세션 초기화까지 한다
+    }
+    if (_expecting != Expecting::Nothing) {
+        failSession("Disconnected before the result arrived.", common::LogLevel::Warn);
+        return;
+    }
     closeSocket();
 }
 
