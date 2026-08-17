@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -39,8 +40,17 @@ struct PingOutcome {
 // 오판하지 않을 만큼의 표본)
 inline constexpr int kDefaultPingAttempts = 4;
 
+// 한 회가 끝날 때마다 즉시 불린다 (호출자가 진행 상황을 바로 보여줄 수 있게).
+//
+// 왜 필요한가: 4회를 다 돌고 한꺼번에 돌려주면, 응답이 없는 경우(회당 1초 x 4회) 사용자는
+// 4초간 빈 창을 보다가 4줄을 동시에 받는다. 실제 ping은 한 줄씩 나오고, 진단 도구에서는
+// "첫 응답이 왔는가"를 즉시 아는 것이 목적이다.
+// 이 콜백은 호출한 스레드(=스레드풀)에서 실행된다 — 안에서 libuv API를 부르면 안 된다.
+using PingReplySink = std::function<void(const PingReply&)>;
+
 // ip로 ICMP echo를 attempts회 보낸다. 관리자 권한은 필요하지 않다.
-// 블로킹 호출 — 위 스레드 규칙을 지킬 것.
-PingOutcome icmpPing(const std::string& ip, int attempts = kDefaultPingAttempts);
+// 블로킹 호출 — 위 스레드 규칙을 지킬 것. onReply는 비워둘 수 있다.
+PingOutcome icmpPing(const std::string& ip, int attempts = kDefaultPingAttempts,
+                     const PingReplySink& onReply = {});
 
 }  // namespace client

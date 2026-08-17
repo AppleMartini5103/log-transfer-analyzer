@@ -50,7 +50,7 @@ std::string addressText(IPAddr address) {
 
 }  // namespace
 
-PingOutcome icmpPing(const std::string& ip, int attempts) {
+PingOutcome icmpPing(const std::string& ip, int attempts, const PingReplySink& onReply) {
     PingOutcome outcome;
 
     // IPv4만 지원한다 → 근거: 서버 주소 입력이 IPv4 전제이고(design 5번 기본 포트/주소 규격),
@@ -87,14 +87,17 @@ PingOutcome icmpPing(const std::string& ip, int attempts) {
             reply.success = false;
             reply.detail = (error == IP_REQ_TIMED_OUT) ? "request timed out"
                                                        : statusText(error);
-            outcome.replies.push_back(std::move(reply));
-            continue;
+        } else {
+            const auto* echo = reinterpret_cast<const ICMP_ECHO_REPLY*>(replyBuffer.data());
+            reply.success = (echo->Status == IP_SUCCESS);
+            reply.roundTripMs = echo->RoundTripTime;
+            reply.detail = reply.success ? addressText(echo->Address) : statusText(echo->Status);
         }
 
-        const auto* echo = reinterpret_cast<const ICMP_ECHO_REPLY*>(replyBuffer.data());
-        reply.success = (echo->Status == IP_SUCCESS);
-        reply.roundTripMs = echo->RoundTripTime;
-        reply.detail = reply.success ? addressText(echo->Address) : statusText(echo->Status);
+        // 누적보다 통지를 먼저 한다 — 한 회가 끝나는 즉시 화면에 뜨는 것이 이 콜백의 목적이다
+        if (onReply) {
+            onReply(reply);
+        }
         outcome.replies.push_back(std::move(reply));
     }
     return outcome;
@@ -109,11 +112,12 @@ namespace client {
 // 클라이언트는 Windows 전용이지만 이 파일은 tests 타깃을 통해 Linux에서도 컴파일된다.
 // raw 소켓 ICMP는 보통 root를 요구하므로 흉내내지 않고, "제공하지 않음"을 명시한다 —
 // 조용히 성공을 반환하면 테스트가 진단 기능을 검증했다고 착각한다.
-PingOutcome icmpPing(const std::string& /*ip*/, int /*attempts*/) {
+PingOutcome icmpPing(const std::string& /*ip*/, int /*attempts*/,
+                     const PingReplySink& /*onReply*/) {
     PingOutcome outcome;
     outcome.supported = false;
     outcome.error = "ICMP diagnostics are available on the Windows client only";
-    return outcome;
+    return outcome;  // 시도 자체를 하지 않으므로 onReply는 부르지 않는다
 }
 
 }  // namespace client

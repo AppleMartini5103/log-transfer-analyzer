@@ -38,6 +38,14 @@ std::string formatRate(std::uint64_t bytes, std::uint64_t elapsedNs) {
     return std::string{buffer.data()};
 }
 
+// 진단 한 줄. 회당 통지(스레드풀)와 요약 계산(루프 스레드)이 같은 문구를 써야 하므로 한 곳에 둔다.
+std::string pingReplyLine(const PingReply& reply) {
+    if (!reply.success) {
+        return reply.detail;  // "request timed out" 등 사유가 그대로 한 줄이 된다
+    }
+    return "reply from " + reply.detail + ": time=" + std::to_string(reply.roundTripMs) + "ms";
+}
+
 }  // namespace
 
 // 소켓 이벤트를 서비스로 되돌리는 옵저버. 기본 구현이 빈 몸체라 필요한 것만 오버라이드한다.
@@ -716,15 +724,22 @@ void TransferService::handle(const PingCommand& command) {
     }
 }
 
-// libuv 스레드풀에서 실행된다 — 이 함수 안에서는 소켓·큐·UI를 절대 만지지 않는다.
+// libuv 스레드풀에서 실행된다 — 소켓·uv 핸들·UiState는 절대 만지지 않는다.
 // 읽는 것은 _pingTarget, 쓰는 것은 _pingOutcome뿐이고, 단일 in-flight 규칙이 그 둘의
 // 배타 접근을 보장한다 (헤더의 근거 참조).
+//
+// pushPingLine을 이 스레드에서 부르는 것은 규칙 위반이 아니다: 그 경로는 뮤텍스로 보호된
+// 이벤트 큐에 넣기만 하고 libuv API를 쓰지 않는다 — design 7번이 그 큐를 "스레드를 건너는
+// 통로"로 정의했다. 회당 즉시 내보내야 응답이 없을 때(회당 1초) 화면이 4초간 비지 않는다.
 void TransferService::onPingWorkCb(uv_work_t* request) {
     auto* self = static_cast<TransferService*>(request->data);
     if (self == nullptr) {
         return;
     }
-    self->_pingOutcome = icmpPing(self->_pingTarget);
+    self->_pingOutcome = icmpPing(self->_pingTarget, kDefaultPingAttempts,
+                                  [self](const PingReply& reply) {
+                                      self->pushPingLine(pingReplyLine(reply));
+                                  });
 }
 
 // 루프 스레드로 돌아온다 — 여기서부터 이벤트 큐를 써도 안전하다.
@@ -747,16 +762,14 @@ void TransferService::onPingDoneCb(uv_work_t* request, int status) {
         return;
     }
 
+    // 회별 줄은 스레드풀에서 이미 내보냈다 (onPingWorkCb의 sink). 여기서는 집계만 한다 —
+    // 다시 내보내면 같은 줄이 두 번 뜬다
     std::size_t succeeded = 0;
     std::uint32_t totalMs = 0;
     for (const PingReply& reply : outcome.replies) {
         if (reply.success) {
             ++succeeded;
             totalMs += reply.roundTripMs;
-            self->pushPingLine("reply from " + reply.detail + ": time=" +
-                               std::to_string(reply.roundTripMs) + "ms");
-        } else {
-            self->pushPingLine(reply.detail);
         }
     }
 
