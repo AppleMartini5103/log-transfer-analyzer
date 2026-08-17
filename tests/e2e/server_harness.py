@@ -1,10 +1,11 @@
 """서버 프로세스 기동·관찰·종료 (E2E 하네스).
 
 각 시나리오는 깨끗한 임시 디렉토리에서 서버를 띄운다 — 서버가 실행 디렉토리 기준으로
-result.csv / skip_report.txt / server.pid / server.log를 만들기 때문에(design 10번:
-chdir("/") 생략), 디렉토리를 격리하면 시나리오 간 산출물이 섞이지 않는다.
+result.csv / skip_report.txt / server.pid / logs/<YYYYMMDD>/server.log를 만들기 때문에
+(design 10번: chdir("/") 생략), 디렉토리를 격리하면 시나리오 간 산출물이 섞이지 않는다.
 """
 
+import glob
 import os
 import shutil
 import socket
@@ -111,10 +112,17 @@ class ServerProcess:
             return handle.read()
 
     def log_text(self):
-        """데몬이면 server.log, 포그라운드면 캡처한 stdout."""
-        data = self.read_artifact("server.log")
-        if data is None:
-            data = self.read_artifact("stdout.log")
+        """데몬이면 logs/<YYYYMMDD>/server.log, 포그라운드면 캡처한 stdout.
+
+        날짜 디렉토리 아래인 이유는 design 14번(로그 회전·보관)이다 — 활성 파일 이름만
+        고정이고 디렉토리는 날짜로 갈리므로 하네스는 glob으로 찾는다. 자정을 넘겨 두
+        디렉토리가 생긴 경우를 대비해 가장 최근 것을 읽는다.
+        """
+        candidates = sorted(glob.glob(os.path.join(self.workdir, "logs", "*", "server.log")))
+        if candidates:
+            with open(candidates[-1], "rb") as handle:
+                return handle.read().decode("utf-8", "replace")
+        data = self.read_artifact("stdout.log")
         return data.decode("utf-8", "replace") if data else ""
 
     def stop(self, timeout=5.0):
