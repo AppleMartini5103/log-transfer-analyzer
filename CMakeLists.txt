@@ -13,6 +13,13 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
+# Windows: libuv의 uv.h가 <windows.h>를 끌어오면서 min/max 매크로가 std::min/std::max를
+# 깨뜨린다 (error C2589 "'(': '::' 오른쪽에 잘못된 토큰"). NOMINMAX로 매크로 자체를 없앤다.
+# WIN32_LEAN_AND_MEAN은 불필요한 하위 헤더를 잘라 빌드 시간을 줄인다.
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 # AddressSanitizer + UBSan (gcc/clang). 컨벤션 7번의 "제출 전 누수 0 확인"을 상시 실행
 # 가능하게 만든다: cmake -B build-asan -DENABLE_SANITIZERS=ON && ctest --test-dir build-asan
 # 경고 없이 통과하던 dangling string_view를 실제로 잡아낸 도구라 옵션으로 고정해 둔다.
@@ -34,7 +41,13 @@ else()
 endif()
 
 add_subdirectory(common)
-add_subdirectory(server)
+
+# server/ is Linux-only: the daemon uses POSIX (fork/setsid/unistd.h) and the
+# assignment specifies a Linux server. Building it on Windows serves no purpose
+# and would require #ifdef noise throughout the daemon.
+if(NOT WIN32)
+    add_subdirectory(server)
+endif()
 
 # client/ is Windows-only (DearImGui + Win32); added when client work starts.
 # if(WIN32)

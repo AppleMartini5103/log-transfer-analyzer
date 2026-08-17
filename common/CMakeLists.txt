@@ -17,4 +17,10 @@ target_include_directories(common PUBLIC
     ${THIRDPARTY_DIR}/libuv/include
 )
 target_link_libraries(common PUBLIC ${LIBUV_LIB})
+
+# Windows: ntohs/htons 등 바이트 오더 변환이 libc가 아니라 Winsock에 있다
+# (TcpSocket::peerAddress). Linux에서 pthread/dl을 링크하는 것과 같은 성격의 플랫폼 의존.
+if(WIN32)
+    target_link_libraries(common PUBLIC ws2_32)
+endif()
 target_compile_definitions(common PRIVATE BUILD_DATE="${BUILD_DATE}")

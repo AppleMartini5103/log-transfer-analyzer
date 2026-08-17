@@ -104,7 +104,9 @@ TEST_CASE("logger: concurrent writers produce whole, untorn lines") {
     REQUIRE(Logger::instance().openFile(kTestLogPath));
 
     constexpr int kThreads = 4;
-    constexpr int kLinesEach = 500;
+    // static: 아래 람다가 기본 캡처 모드 없이([t]) 이 상수를 쓴다 — MSVC는 캡처를
+    // 요구하고(C3493) gcc는 허용한다. 정적 저장 기간이면 캡처 대상이 아니라 양쪽 통과.
+    static constexpr int kLinesEach = 500;
     std::vector<std::thread> writers;
     writers.reserve(kThreads);
     for (int t = 0; t < kThreads; ++t) {

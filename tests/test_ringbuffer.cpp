@@ -158,7 +158,9 @@ TEST_CASE("ring: consumer drain loop empties the ring (session abort path)") {
 
 TEST_CASE("ring: two-thread stress — order and content survive contention") {
     // 실제 SPSC 배치: producer 1 + consumer 1. 작은 링으로 랩어라운드·경합 극대화
-    constexpr int kMessages = 200'000;
+    // static: 아래 람다가 기본 캡처 모드 없이([&ring]) 이 상수를 쓴다. gcc는 상수식이라
+    // 캡처 없이 허용하지만 MSVC는 캡처를 요구한다(C3493). 정적 저장 기간이면 양쪽 모두 통과.
+    static constexpr int kMessages = 200'000;
     SpscRingBuffer ring{8, 16};
 
     std::thread producer([&ring] {
