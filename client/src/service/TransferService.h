@@ -156,6 +156,12 @@ private:
 
     // 업로드 진행 상태 (루프 스레드 전용)
     bool _uploading = false;
+
+    // 업로드 시작 시각 (uv_hrtime, 나노초). 완료 로그에 소요 시간·처리량을 함께 남기기 위한 값.
+    // → 왜 벽시계가 아니라 uv_hrtime인가: 로그 타임스탬프는 1초 해상도라 4초와 4.9초를 구분할
+    //   수 없다. 실제로 [39] 처리량 측정에서 그 때문에 "80~120MB/s 구간"으로밖에 기록하지
+    //   못했다. 단조 시계로 재면 그 폭이 사라지고, NTP 시각 보정에도 영향받지 않는다.
+    std::uint64_t _uploadStartedAt = 0;
     std::size_t _inFlightWrites = 0;
     bool _trailerSent = false;
     std::uint64_t _uploadTotal = 0;

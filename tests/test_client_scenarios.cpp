@@ -571,6 +571,15 @@ TEST_CASE("client scenario: the result stays saveable after the server closes") 
     harness.startUpload();
     REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }, 60000));
 
+    // 완료 로그에 소요 시간·처리량이 실려야 한다 (커밋 [41]).
+    // 포맷을 테스트로 고정하는 이유: 이 값은 사람이 로그를 읽어 성능을 판단하는 유일한 근거라,
+    // 문구를 손대다 조용히 사라지면 다음 측정에서 다시 타임스탬프로 추정하게 된다.
+    INFO("logs:" << harness.allLogs());
+    REQUIRE(harness.sawLog("Upload finished"));
+    REQUIRE(harness.sawLog(" in "));     // "... bytes in 4.21s, ..."
+    REQUIRE(harness.sawLog("MB/s"));
+    REQUIRE(harness.sawLog("crc32="));   // 기존 정보가 밀려나지 않았다
+
     // 서버가 닫는 것을 기다린다 — 완료 직후이므로 EOF는 Info로 분류돼야 한다 (design 12번)
     REQUIRE(harness.waitFor([&] { return harness.link == LinkState::Disconnected; }));
     INFO("logs:" << harness.allLogs());
