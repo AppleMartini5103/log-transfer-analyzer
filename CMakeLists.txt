@@ -64,12 +64,23 @@ endif()
 if(ENABLE_SANITIZERS AND NOT MSVC)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
     add_link_options(-fsanitize=address,undefined)
+    message(STATUS "Sanitizers: AddressSanitizer + UndefinedBehaviorSanitizer ENABLED")
 endif()
 
 if(ENABLE_TSAN AND NOT MSVC)
     add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
     add_link_options(-fsanitize=thread)
+    message(STATUS "Sanitizers: ThreadSanitizer ENABLED")
 endif()
+
+# 켜졌을 때 한 줄을 반드시 찍는 이유 — 실제로 겪은 실패다.
+# CMake는 프로젝트가 모르는 -D 변수를 "Manually-specified variables were not used"
+# 경고 한 줄로만 알린다. 옵션이 적용되지 않은 빌드는 평범한 빌드로 조용히 성공하고,
+# 테스트도 통과하므로 "새니타이저를 돌렸고 깨끗했다"로 오독된다. 실제로 커밋 [45]가
+# 브랜치에만 있고 체크아웃에 없던 상태로 -DENABLE_TSAN=ON을 준 실행이 그렇게 지나갔다.
+# 위 STATUS 줄의 부재가 곧 "적용되지 않았다"는 관측 가능한 신호가 된다.
+# → 링크까지 실제로 됐는지는 빌드 후 확인한다: ldd <binary> | grep -E 'libtsan|libasan'
+#   (STATUS는 configure 시점의 의도, ldd는 결과물의 사실 — 둘은 다른 것을 증명한다)
 
 # 3rdparty: include/ and lib/ are generated from tarballs by each
 # library's build_linux.sh / build_window.bat (see 3rdparty/*/).
