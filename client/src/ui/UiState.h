@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -42,6 +43,20 @@ struct LogEntry {
     common::LogLevel level = common::LogLevel::Info;
     std::string text;  // "[YYYY-MM-DD HH:MM:SS] [Info] ..." 완성형 (컨벤션 8번 포맷)
 };
+
+// 고정 버퍼(ImGui InputText가 쓰는 std::array)에서 널 종료까지를 꺼낸다.
+//
+// [왜 std::strlen이나 std::string(ptr)을 쓰지 않는가]
+//   둘 다 널을 만날 때까지 읽는다 — 버퍼가 종료돼 있지 않으면 배열 경계를 넘어 읽는다.
+//   컨벤션 1번이 strlen을 금지하는 이유가 이 무경계 스캔이고, std::string(ptr) 생성자도
+//   이름만 다른 같은 위험이다. std::find는 end()에서 멈추므로 종료되지 않은 버퍼에서도
+//   경계를 넘지 않고, 그 경우 버퍼 전체를 돌려준다.
+//   ※ ImGui는 항상 널을 넣어주므로 실제로 걸릴 일은 드물다. 그래도 "읽기가 넘칠 수 있는
+//     코드를 두지 않는다"가 규칙의 취지다 — 조건이 바뀌었을 때 조용히 뚫리는 종류다.
+template <std::size_t N>
+std::string bufferText(const std::array<char, N>& buffer) {
+    return std::string(buffer.begin(), std::find(buffer.begin(), buffer.end(), '\0'));
+}
 
 // 바이트 수를 사람이 읽는 크기로 ("482.8 MB", "512 bytes").
 //

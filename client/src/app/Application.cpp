@@ -187,7 +187,7 @@ UiCallbacks Application::makeCallbacks() {
             _uiState.logError("Port must be a number between 1 and 65535.");
             return;
         }
-        const std::string ip(_uiState.serverIp.data());
+        const std::string ip = bufferText(_uiState.serverIp);
         if (ip.empty()) {
             _uiState.logError("Server IP is empty.");
             return;
@@ -205,7 +205,7 @@ UiCallbacks Application::makeCallbacks() {
     };
 
     callbacks.onPing = [this] {
-        const std::string ip(_uiState.serverIp.data());
+        const std::string ip = bufferText(_uiState.serverIp);
         if (ip.empty()) {
             // 조용히 무시하지 않는다 — 버튼이 고장난 것처럼 보인다 (컨벤션 8번)
             _uiState.logWarn("Ping: enter the server IP first.");
@@ -249,7 +249,7 @@ UiCallbacks Application::makeCallbacks() {
         // Cancel을 눌러도 서버 세션 하나가 이미 소비된다 — 1:1이라 그 사이 다른 클라이언트는
         // 대기한다. 대상 주소까지 보여주는 이유는 주소 오입력도 같이 잡기 위함이다.
         const std::string destination =
-            std::string(_uiState.serverIp.data()) + ":" + std::string(_uiState.serverPort.data());
+            bufferText(_uiState.serverIp) + ":" + bufferText(_uiState.serverPort);
         if (!confirmUpload(_hwnd, _uiState.fileName, _uiState.fileSize, destination)) {
             // 취소는 정상 조작이므로 Info로 남긴다 — 에러가 아니다
             _uiState.logInfo("Upload cancelled before it started.");

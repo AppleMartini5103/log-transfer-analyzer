@@ -79,11 +79,14 @@ void UiState::log(common::LogLevel level, const std::string& message) {
 }
 
 bool UiState::parsePort(std::uint16_t& port) const {
-    const char* begin = serverPort.data();
-    const char* end = begin + std::strlen(begin);
-    if (begin == end) {
+    // 널 위치를 배열 경계 안에서 찾는다 (bufferText의 근거 참조 — 종전에는 std::strlen이라
+    // 종료되지 않은 버퍼에서 경계를 넘을 수 있었다)
+    const std::string text = bufferText(serverPort);
+    if (text.empty()) {
         return false;
     }
+    const char* begin = text.data();
+    const char* end = begin + text.size();
 
     unsigned int value = 0;
     const auto result = std::from_chars(begin, end, value);
