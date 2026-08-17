@@ -46,11 +46,11 @@ using testsupport::runUntil;
 namespace {
 
 constexpr const char* kUploadName = "scenario.log";
-// 강제 단절이 "업로드 도중"에 걸릴 만큼은 크고, 반복 실행이 디스크에 짓눌리지 않을 만큼은
-// 작게 잡는다. 서버는 첫 페이로드 조각(약 64KB)에서 끊고 클라이언트의 미완료 쓰기 상한은
-// 8x64KB=512KB이므로 2MB면 업로드가 먼저 끝날 일이 없다 — 파일이 작으면 검증 대상이
-// "완료 후 EOF"라는 다른 경로로 바뀐다.
-// (16MB로 잡았다가 테스트 6개 x 40회 반복에서 3.8GB를 쓰게 되어 되돌렸다.)
+// 업로드 크기. "전송 중"을 확정하는 수단은 크기가 아니라 서버 동작이다 — dropOnFirstPayload는
+// 첫 페이로드 조각에서 끊고, stallAfterHeader는 읽기를 멈춰 아예 정지시킨다. 그래서 크기는
+// 소켓 버퍼를 채워 정지가 성립할 만큼만 크면 된다(미완료 쓰기 상한 8x64KB=512KB보다 넉넉히).
+// (처음엔 16MB로 시간을 벌려 했는데, 테스트 6개 x 40회 반복에서 3.8GB를 써 10분 타임아웃이
+//  났고 그렇게 벌어도 경쟁은 남았다 — Linux에서 실제로 걸렸다. 크기로 푸는 문제가 아니다.)
 constexpr std::size_t kUploadBytes = 2 * 1024 * 1024;
 
 // 서버 역할 최소 구현. 바이트를 세기만 하고, 응답·단절 시점은 테스트가 정한다.
@@ -109,6 +109,21 @@ public:
             return;
         }
 
+        // 헤더를 받은 뒤 읽기를 멈춰 업로드를 정지시킨다.
+        //
+        // 왜 필요한가: "업로드 중"에 Cancel·Disconnect·종료를 넣는 시나리오는 그 순간 실제로
+        // 업로드가 진행 중이어야 성립한다. 그런데 2MB는 루프백에서 너무 빨리 끝나, 명령이
+        // 드레인되기 전에 업로드가 완료돼 버린다 (_uploading=false가 되면 Cancel은 정상적으로
+        // 무시된다 — 제품이 옳고 테스트가 틀린 상황이다). Linux에서 실제로 이 경쟁에 걸렸고
+        // Windows에서 통과한 것도 우연이었다.
+        // 읽기를 멈추면 양쪽 소켓 버퍼가 차고 미완료 쓰기가 상한(8청크)에 묶여 업로드가
+        // 확실히 멈춘 채로 남는다 — 파일을 키워 시간을 버는 것보다 결정적이다.
+        if (stallAfterHeader && received.size() >= headerSize() && _accepted &&
+            _accepted->isReading()) {
+            _accepted->stopRead();
+            return;
+        }
+
         if (_responded || received.size() < totalUploadBytes()) {
             return;  // 아직 업로드가 다 도착하지 않았다
         }
@@ -123,6 +138,7 @@ public:
     // 테스트가 설정하는 정책
     OnUploadComplete policy = OnUploadComplete::FullResult;
     bool dropOnFirstPayload = false;
+    bool stallAfterHeader = false;
     std::uint64_t uploadSize = kUploadBytes;
     std::string csv = "module,hour,count\nRadarTrackNodeState,2026-06-19 22,7\n";
 
@@ -400,7 +416,7 @@ TEST_CASE("client scenario: server killed mid-upload releases resources and reop
 TEST_CASE("client scenario: cancelling an upload converges on the same cleanup path") {
     Harness harness;
     // 서버는 받기만 하고 응답하지 않는다 — 취소가 먼저 일어나야 한다
-    harness.server->policy = FakeServer::OnUploadComplete::DropSilently;
+    harness.server->stallAfterHeader = true;  // 업로드를 정지시켜 "전송 중"을 확정한다
 
     harness.connect();
     harness.startUpload();
@@ -422,7 +438,7 @@ TEST_CASE("client scenario: disconnect during an upload cancels it too") {
     // Cancel 버튼이 아니라 Disconnect로 끊는 경로. design 7번의 "취소·에러·타임아웃이 모두
     // 같은 CLEANUP으로 수렴한다"가 이 경로에서도 성립해야 한다.
     Harness harness;
-    harness.server->policy = FakeServer::OnUploadComplete::DropSilently;
+    harness.server->stallAfterHeader = true;  // 업로드를 정지시켜 "전송 중"을 확정한다
 
     harness.connect();
     harness.startUpload();
@@ -489,7 +505,7 @@ TEST_CASE("client scenario: quitting mid-upload joins every thread cleanly") {
     // design 7번 스레드 총괄표의 "종료" 칸이 비어 있으면 여기서 걸린다 (H-1 유형).
     // 정리가 실패하면 join이 걸려 이 테스트가 타임아웃으로 죽는다 — 통과 자체가 검증이다.
     Harness harness;
-    harness.server->policy = FakeServer::OnUploadComplete::DropSilently;
+    harness.server->stallAfterHeader = true;  // 업로드를 정지시켜 "전송 중"을 확정한다
 
     harness.connect();
     harness.startUpload();
