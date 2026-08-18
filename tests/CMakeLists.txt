@@ -66,12 +66,5 @@ target_include_directories(unit_tests PRIVATE
 
 add_test(NAME unit_tests COMMAND unit_tests)
 
-# Windows: libuv는 DLL로 빌드되므로 실행 파일 옆에 uv.dll이 있어야 한다
-# (없으면 0xC0000135 STATUS_DLL_NOT_FOUND로 즉시 종료). Linux는 RPATH로 해결된다.
-if(WIN32)
-    add_custom_command(TARGET unit_tests POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${THIRDPARTY_DIR}/libuv/lib/window/async/uv.dll"
-                "$<TARGET_FILE_DIR:unit_tests>"
-        COMMENT "Copying uv.dll next to unit_tests.exe")
-endif()
+# uv.dll 복사 단계는 없다 — Windows도 libuv를 정적으로 링크한다 (design 19번).
+# 종전에는 여기서 uv.dll을 실행 파일 옆으로 복사했다. 빠뜨리면 0xC0000135로 즉시 죽었다.

@@ -1,10 +1,17 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM libuv Windows DLL Build and Deploy Script
+REM libuv Windows STATIC Build and Deploy Script
+REM
+REM Builds the static library (uv_a.lib) with the static CRT (/MT) so that the
+REM submitted client.exe runs without uv.dll and without the VC++ redistributable.
+REM Matching the CRT is mandatory: an /MT executable linked against an /MD library
+REM puts two CRTs in one process with separate heaps. The linker usually stops this
+REM with LNK2038, but any combination it does not stop corrupts memory silently the
+REM moment one CRT frees what the other allocated.
 
 echo ========================================
-echo libuv 1.51.0 DLL Build Script
+echo libuv 1.51.0 Static Build Script
 echo (Windows Library Build)
 echo ========================================
 echo.
@@ -111,7 +118,8 @@ if %ERRORLEVEL% EQU 0 (
     echo [INFO] Detected Visual Studio compiler, using NMake Makefiles...
     cmake .. -G "NMake Makefiles" ^
         -DCMAKE_BUILD_TYPE=Release ^
-        -DBUILD_SHARED_LIBS=ON ^
+        -DLIBUV_BUILD_SHARED=OFF ^
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
         -DLIBUV_BUILD_TESTS=OFF ^
         -DLIBUV_BUILD_BENCH=OFF
     if !ERRORLEVEL! EQU 0 (
@@ -126,7 +134,8 @@ if !GENERATOR_FOUND! EQU 0 (
 
     REM Try VS 2022
     cmake .. -G "Visual Studio 17 2022" -A x64 ^
-        -DBUILD_SHARED_LIBS=ON ^
+        -DLIBUV_BUILD_SHARED=OFF ^
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
         -DLIBUV_BUILD_TESTS=OFF ^
         -DLIBUV_BUILD_BENCH=OFF >nul 2>&1
     if !ERRORLEVEL! EQU 0 (
@@ -138,7 +147,8 @@ if !GENERATOR_FOUND! EQU 0 (
 
     REM Try VS 2019
     cmake .. -G "Visual Studio 16 2019" -A x64 ^
-        -DBUILD_SHARED_LIBS=ON ^
+        -DLIBUV_BUILD_SHARED=OFF ^
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
         -DLIBUV_BUILD_TESTS=OFF ^
         -DLIBUV_BUILD_BENCH=OFF >nul 2>&1
     if !ERRORLEVEL! EQU 0 (
@@ -150,7 +160,8 @@ if !GENERATOR_FOUND! EQU 0 (
 
     REM Try VS 2017
     cmake .. -G "Visual Studio 15 2017 Win64" ^
-        -DBUILD_SHARED_LIBS=ON ^
+        -DLIBUV_BUILD_SHARED=OFF ^
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
         -DLIBUV_BUILD_TESTS=OFF ^
         -DLIBUV_BUILD_BENCH=OFF >nul 2>&1
     if !ERRORLEVEL! EQU 0 (
@@ -162,7 +173,8 @@ if !GENERATOR_FOUND! EQU 0 (
 
     REM Try VS 2015
     cmake .. -G "Visual Studio 14 2015 Win64" ^
-        -DBUILD_SHARED_LIBS=ON ^
+        -DLIBUV_BUILD_SHARED=OFF ^
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
         -DLIBUV_BUILD_TESTS=OFF ^
         -DLIBUV_BUILD_BENCH=OFF >nul 2>&1
     if !ERRORLEVEL! EQU 0 (
@@ -180,7 +192,8 @@ if !GENERATOR_FOUND! EQU 0 (
         echo [INFO] Detected MinGW, using MinGW Makefiles...
         cmake .. -G "MinGW Makefiles" ^
             -DCMAKE_BUILD_TYPE=Release ^
-            -DBUILD_SHARED_LIBS=ON ^
+            -DLIBUV_BUILD_SHARED=OFF ^
+        -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
             -DLIBUV_BUILD_TESTS=OFF ^
             -DLIBUV_BUILD_BENCH=OFF
         if !ERRORLEVEL! EQU 0 (
@@ -217,7 +230,7 @@ echo.
 
 :build_step
 REM 4. Build
-echo [4/5] Building libuv DLL...
+echo [4/5] Building libuv static library...
 set BUILD_SUCCESS=0
 
 REM Check if NMake
@@ -264,8 +277,14 @@ if !BUILD_SUCCESS! EQU 0 (
 
 echo [SUCCESS] Build completed
 echo.
-
 REM 5. Copy files
+
+REM Delete artifacts left by the previous DLL build. Leaving them behind suggests
+REM uv.dll is still required, and a stale copy sitting next to the executable would
+REM keep working without anyone noticing the build no longer produces it.
+if exist "..\..\%LIB_OUTPUT_DIR%\uv.dll" del /q "..\..\%LIB_OUTPUT_DIR%\uv.dll"
+if exist "..\..\%LIB_OUTPUT_DIR%\uv.lib" del /q "..\..\%LIB_OUTPUT_DIR%\uv.lib"
+
 echo [5/5] Copying files to output directories...
 
 REM Copy DLL and LIB files for Visual Studio build
@@ -295,6 +314,13 @@ if exist "uv.lib" (
     copy /Y "uv.lib" "..\..\%LIB_OUTPUT_DIR%\"
     echo Copied uv.lib to %LIB_OUTPUT_DIR%
 )
+REM libuv.lib is the actual static output on Windows: CMakeLists.txt sets
+REM OUTPUT_NAME "uv" and, under if(WIN32), PREFIX "lib" - so it is neither
+REM uv.lib nor uv_a.lib. The name is deterministic, not build-system dependent.
+if exist "libuv.lib" (
+    copy /Y "libuv.lib" "..\..\%LIB_OUTPUT_DIR%\"
+    echo Copied libuv.lib to %LIB_OUTPUT_DIR%
+)
 if exist "uv_a.lib" (
     copy /Y "uv_a.lib" "..\..\%LIB_OUTPUT_DIR%\"
     echo Copied uv_a.lib to %LIB_OUTPUT_DIR%
@@ -323,9 +349,9 @@ echo [SUCCESS] libuv build completed!
 echo ========================================
 echo.
 echo Usage in your project:
-echo   1. Link against: %LIB_OUTPUT_DIR%\uv.lib (for DLL)
+echo   1. Link against: %LIB_OUTPUT_DIR%\uv_a.lib (static)
 echo   2. Include: #include ^<uv.h^>
-echo   3. Make sure uv.dll is in your exe directory or PATH
+echo   3. No DLL to ship - the library is linked into the executable
 echo.
 echo Cleaning up temporary files...
 if exist "%EXTRACT_DIR%" rmdir /s /q "%EXTRACT_DIR%"

@@ -59,7 +59,11 @@ copy /y "%SRC_DIR%\catch_amalgamated.hpp" include\ >nul
 REM Compile static library
 echo [3/4] Compiling static library (C++17)...
 if not exist lib\window mkdir lib\window
-cl /nologo /std:c++17 /O2 /EHsc /utf-8 /MD /c "%SRC_DIR%\catch_amalgamated.cpp" ^
+REM /MT (static CRT) must match the executables. client and unit_tests are built /MT,
+REM so an /MD Catch2 here fails the link with LNK2038 (RuntimeLibrary mismatch).
+REM The static-link decision is driven by CMAKE_MSVC_RUNTIME_LIBRARY in the root
+REM CMakeLists; 3rdparty follows it (design 19).
+cl /nologo /std:c++17 /O2 /EHsc /utf-8 /MT /c "%SRC_DIR%\catch_amalgamated.cpp" ^
     /I include /Fo:tmp_build\catch_amalgamated.obj
 if errorlevel 1 (
     echo [ERROR] Compilation failed!

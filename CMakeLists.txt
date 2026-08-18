@@ -20,6 +20,17 @@ if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+# MSVC 런타임을 정적(/MT)으로 고정 — 제출물이 VC++ 재배포 패키지 없이 실행되게 만든다.
+# CMP0091(3.15+)이 NEW라 이 변수가 /MD·/MT 선택을 담당한다. 루트에서 한 번만 정하고,
+# 3rdparty도 같은 설정으로 빌드해야 한다 — CRT가 둘이면 한쪽에서 할당하고 다른 쪽에서
+# 해제하는 순간 힙이 손상되고, 링커는 LNK2038로 먼저 막는다 (catch2 build_window.bat 참조).
+#
+# Debug 표현식을 함께 쓰는 이유: 3rdparty는 Release(/MT)로만 빌드하므로 Windows Debug
+# 빌드는 지원 대상이 아니지만, 설정 자체는 구성별로 올바른 값을 내야 나중에 어긋나지 않는다.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # ── 새니타이저 (gcc/clang 전용. MSVC에서는 조용히 무시된다) ────────────────────
 #
 # 두 구성은 상호 배타다. ASan과 TSan은 같은 프로세스의 메모리 접근을 서로 다른 방식으로
@@ -85,12 +96,27 @@ endif()
 # 3rdparty: include/ and lib/ are generated from tarballs by each
 # library's build_linux.sh / build_window.bat (see 3rdparty/*/).
 set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rdparty)
+
 if(WIN32)
-    set(LIBUV_LIB  ${THIRDPARTY_DIR}/libuv/lib/window/async/uv.lib)
+    # 정적 링크 (design 19번) — 제출물이 client.exe 하나로 실행되게 만든다.
+    #
+    # 파일명이 libuv.lib인 이유: libuv CMakeLists.txt:491이 OUTPUT_NAME을 "uv"로 두고
+    # 492-493의 if(WIN32)가 PREFIX를 "lib"로 붙인다. uv_a.lib도 uv.lib도 아니며, 이 이름은
+    # 빌드 시스템과 무관하게 결정적이다. 종전의 uv.lib은 DLL의 임포트 라이브러리였고
+    # 지금 것은 정적 아카이브라, 파일명이 달라진 것이 성격이 바뀐 신호이기도 하다.
+    set(LIBUV_LIB  ${THIRDPARTY_DIR}/libuv/lib/window/async/libuv.lib)
     set(CATCH2_LIB ${THIRDPARTY_DIR}/catch2/lib/window/catch2.lib)
+
+    # 정적 libuv를 쓰면 이 시스템 라이브러리들을 실행 파일이 직접 링크해야 한다.
+    # DLL이던 시절에는 uv.dll이 이미 흡수하고 있어 우리 링크 줄에 나타나지 않았다.
+    # 목록의 출처는 libuv CMakeLists.txt:190-198 (WIN32 분기의 uv_libraries)이며,
+    # 우리는 libuv의 CMake 패키지가 아니라 .lib 경로를 직접 지정하므로 자동으로 따라오지
+    # 않는다 — 빠뜨리면 WSAStartup 등에서 미해결 심볼이 쏟아진다.
+    set(LIBUV_SYSTEM_LIBS psapi user32 advapi32 iphlpapi userenv ws2_32 dbghelp ole32 shell32)
 else()
     set(LIBUV_LIB  ${THIRDPARTY_DIR}/libuv/lib/linux/async/libuv.so)
     set(CATCH2_LIB ${THIRDPARTY_DIR}/catch2/lib/linux/libcatch2.a)
+    set(LIBUV_SYSTEM_LIBS "")
 endif()
 
 add_subdirectory(common)

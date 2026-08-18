@@ -36,11 +36,9 @@ target_include_directories(client PRIVATE
 )
 
 # d3d11/dxgi: DX11 백엔드. common: 프로토콜·소켓·CRC·링버퍼(서버와 공유).
+# 시스템 라이브러리는 common이 PUBLIC으로 전파한다 (common/CMakeLists.txt 참조).
 target_link_libraries(client PRIVATE common d3d11 dxgi)
 
-# libuv는 DLL로 빌드되므로 실행 파일 옆에 uv.dll이 있어야 한다 (없으면 0xC0000135).
-add_custom_command(TARGET client POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${THIRDPARTY_DIR}/libuv/lib/window/async/uv.dll"
-            "$<TARGET_FILE_DIR:client>"
-    COMMENT "Copying uv.dll next to client.exe")
+# uv.dll 복사 단계는 없다 — libuv를 정적으로 링크하므로 동반할 DLL 자체가 없다 (design 19번).
+# 종전에는 여기서 uv.dll을 실행 파일 옆으로 복사했다. 복사를 빠뜨리면 0xC0000135
+# (STATUS_DLL_NOT_FOUND)로 즉시 죽었고, 그 취약함이 정적 링크로 옮긴 이유 중 하나다.
