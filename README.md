@@ -63,8 +63,8 @@ $ readelf -d build/server/server | grep RUNPATH
 ```
 
 Copying that one file to another machine therefore fails at load time with
-`libuv.so.1: cannot open shared object file`. It was built with GCC 13.3 for x86-64 glibc, so a
-different distribution may also disagree about `libstdc++` symbol versions.
+`libuv.so.1: cannot open shared object file`. It was built on Ubuntu 24.04.4 LTS with GCC 13.3 for
+x86-64 glibc, so an older distribution may also disagree about `libstdc++` symbol versions.
 
 `./build_project_linux.sh` is the supported path and always works: it builds libuv from the bundled
 tarball, configures CMake, compiles, and runs the tests in one command. The Windows client is
