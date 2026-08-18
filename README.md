@@ -9,14 +9,14 @@ Measured on the reference log (483 MB, 3,483,528 lines):
 
 | | |
 |---|---|
-| Server peak RSS | **8.4 MB** — 17% of the 50 MB limit, independent of file size |
+| Server peak RSS | **8.4 MB** — 17% of the 50 MB limit. Receiving 483 MB adds **176 KB** to it |
 | Corrupted lines | 26, skipped and reported |
-| Throughput | **11.3 MB/s** over 100 Mb/s (95% of line rate); **~97 MiB/s** over a 1 Gb/s direct link |
+| Throughput | **87.1 MB/s** over a 1 Gb/s direct link; **11.3 MB/s** over 100 Mb/s (95% of line rate) |
 | Client memory | 49.5 MB idle, 98.5 MB during a 483 MB transfer — also independent of file size |
 | Deliverable | a single `client.exe`; no DLLs, no VC++ redistributable |
 
-Both throughput figures sit near the link ceiling, so the network is the bound rather than either
-program. The loopback E2E driver completes the same round trip in 1.3 s.
+Neither program is the bottleneck at either link speed. The loopback E2E driver completes the same
+round trip in 1.3 s.
 
 ---
 
@@ -52,6 +52,25 @@ build/tests/unit_tests               # unit test runner
 `client.exe` is self-contained: libuv and the MSVC runtime are linked in, so it runs on a clean
 Windows machine with nothing beside it. `dumpbin /DEPENDENTS` lists only DLLs that ship with the
 OS. The server binary is dynamically linked against the system libuv build in `3rdparty/`.
+
+### If Windows refuses to run client.exe
+
+On Windows 11 with Smart App Control enabled, launching the prebuilt `client.exe` may fail with
+"blocked an app that might be unsafe". The reason is not a malware verdict: SAC requires either a
+signature from a publisher it trusts or an established cloud reputation for that exact file, and a
+freshly compiled unsigned binary has neither. Windows records the real reason under
+**Event Viewer → Applications and Services Logs → Microsoft → Windows → CodeIntegrity →
+Operational**, where the block appears as event 3077/3118 with the text "did not meet the Enterprise
+signing level requirements".
+
+The verdict is per-file and not stable over time: the same bytes were blocked and then allowed
+minutes later during development, so retrying sometimes works. Rebuilding does not help — it
+produces a new file with no reputation at all — and a self-signed certificate does not satisfy the
+signing level SAC asks for.
+
+**Building from source avoids the problem entirely**, because the binary is then produced on the
+machine that runs it. That path is always available and is the recommended one if the prebuilt
+executable is blocked.
 
 ### Manual build
 
@@ -278,6 +297,19 @@ threads would leave the child with locked mutexes and nobody to unlock them.
 
 ![client after a completed transfer](client/docs/client-result.jpg)
 
+The four controls the assignment asks for map onto the window like this:
+
+| Required control | In the client |
+|---|---|
+| File selector | `...` next to the **File** row, opening the Win32 open dialog |
+| Upload button | **Send** (a confirmation dialog names the file, its size and the destination) |
+| Progress bar with live % | **Send** and **Result** bars, each showing its own percentage |
+| Result download button | **Save**, which writes the received `result.csv` where you choose |
+
+`Save` rather than `Download` because the download already happened: the CSV is a few kilobytes, so
+the client receives and CRC-checks it automatically the moment the server sends it, and this button
+is the step that puts it on disk. Naming it after what it does keeps the label honest.
+
 The screenshot is the finished state of a 483 MB transfer, and it shows the one combination that
 needs explaining: the indicator reads **Disconnected** while **Save** is enabled.
 
@@ -347,11 +379,27 @@ sweep then showed that a 1 MB chunk setting produced a 64 MB ring and a 69 MB pe
 configuration value could breach the process limit. Slot count is now computed from a fixed 4 MB
 budget, and the same sweep now peaks at 9.4 MB with 1 MB chunks.
 
-**No manual memory management.** `new`, `delete`, `malloc`, `free`, `calloc`, and `realloc` do not
-appear anywhere in the sources; ownership is expressed with `std::unique_ptr`, STL containers, and
-move semantics. Because `uv_close` is asynchronous, handle memory is owned by a `unique_ptr` whose
-ownership transfers to the close callback if the wrapper dies first, which keeps teardown safe even
-when a peer disappears mid-callback.
+**No manual memory management.** `new`, `delete`, `malloc`, `free`, `calloc`, and `realloc` are not
+used to allocate or release anything, anywhere in the sources. Ownership is expressed with
+`std::unique_ptr`, STL containers, and move semantics. Because `uv_close` is asynchronous, handle
+memory is owned by a `unique_ptr` whose ownership transfers to the close callback if the wrapper
+dies first, which keeps teardown safe even when a peer disappears mid-callback.
+
+A plain `grep delete` does return many hits. Every one is `= delete` on a copy or move constructor —
+the deleted-function syntax that suppresses copying, which is part of the RAII discipline rather than
+a violation of it. To check the rule directly rather than take this paragraph's word for it:
+
+```bash
+grep -rnwE 'new|malloc|calloc|realloc' --include=*.cpp --include=*.h common server client tests
+grep -rnwE 'delete|free' --include=*.cpp --include=*.h common server client tests | grep -v '= delete'
+```
+
+Together they print six lines: four comments that name the forbidden keywords while explaining why
+they are avoided, and two test-case titles containing the English words "new" and "use-after-free".
+No line allocates or releases anything.
+
+Third-party code under `3rdparty/` is out of scope and untouched by us: libuv is C, and Dear ImGui —
+which the assignment names as an acceptable client framework — brings its own allocator.
 
 ### Measured
 
@@ -370,8 +418,24 @@ Throughput and CPU are flat across the range: system-call overhead has already c
 is effectively zero — the socket buffer is not the bottleneck in this environment, so the final
 configuration leaves it to kernel autotuning.
 
-Both figures are relative comparisons: the driver is written in Python and runs over loopback, so
-the absolute throughput reflects the harness as much as the server.
+Those absolute throughputs reflect the harness as much as the server: the driver is Python and runs
+over loopback. What the sweep is for is the chunk decision, and loopback is the right place to make
+it — at 375 MB/s the syscall rate is higher than any real link produces, so a chunk size that buys
+nothing there buys nothing anywhere slower.
+
+**Server memory over a real link**, sampled from `/proc/<pid>/status` on the same process before and
+after a transfer, so the delta is attributable:
+
+| | VmHWM |
+|---|---|
+| Idle, before any session | 8,380 KB |
+| After receiving and analyzing 483 MB | 8,556 KB |
+| **Attributable to the transfer** | **176 KB** |
+
+Peak memory is essentially the startup footprint. Across arrival rates spanning 33x — 11.3 MB/s on
+100 Mb/s, 87.1 MB/s on 1 Gb/s, 375 MB/s on loopback — peak RSS stayed near 8.4 MB every time. The
+bound is not a claim about one measurement; it holds where the ring actually fills and where it
+never does.
 
 **Client, measured with the real GUI over a real link:**
 
@@ -388,12 +452,17 @@ so peak memory does not track file size — a 5 GB file would show the same figu
 | Link | Time for 483 MB | Throughput | Share of line rate |
 |---|---|---|---|
 | 100 Mb/s switched | 42.6 s / 43.0 s (two runs) | 11.3 / 11.2 MB/s | 95% |
-| 1 Gb/s direct | ~5 s | ~97 MiB/s | 81% |
+| 1 Gb/s direct | 5.54 s | 87.1 MB/s | 73% |
 
-Raising the in-flight write cap was considered and rejected: at both link speeds the transfer
-already runs at the ceiling the network allows, so the cap is not what limits it. That conclusion
-held on two links an order of magnitude apart, which is why it is recorded as settled rather than
-provisional.
+The 1 Gb/s run does not saturate the link, and the missing share is on the client's disk rather than
+in either program: the log lives on a hard drive that reads at 82 MB/s cold, which is below the link
+rate. An earlier run of the same build reached 97 MB/s with the file already in the page cache.
+
+Raising the in-flight write cap was considered and rejected. Changing nothing but the network took
+the same build from 11.3 to 87.1 MB/s — an eightfold change that a cap of 8 x 64 KB could not have
+allowed if it were the limit. At 100 Mb/s the link is the bound and at 1 Gb/s the client's disk is;
+in neither case is it the cap. `uv_write` completes when bytes reach the kernel send buffer rather
+than when the peer acknowledges them, so 0.5 MB in flight is ample at sub-millisecond LAN latency.
 
 ---
 
