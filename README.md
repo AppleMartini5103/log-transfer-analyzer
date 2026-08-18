@@ -50,8 +50,27 @@ build/tests/unit_tests               # unit test runner
 ```
 
 `client.exe` is self-contained: libuv and the MSVC runtime are linked in, so it runs on a clean
-Windows machine with nothing beside it. `dumpbin /DEPENDENTS` lists only DLLs that ship with the
-OS. The server binary is dynamically linked against the system libuv build in `3rdparty/`.
+Windows machine with nothing beside it, and `dumpbin /DEPENDENTS` lists only DLLs that ship with the
+OS. The Linux `server` binary is not self-contained — see below.
+
+### The prebuilt Linux binary is not relocatable
+
+The submitted `server` binary links libuv dynamically and its `RUNPATH` points at the build tree:
+
+```
+$ readelf -d build/server/server | grep RUNPATH
+ 0x...(RUNPATH)  Library runpath: [/home/<user>/.../3rdparty/libuv/lib/linux/async]
+```
+
+Copying that one file to another machine therefore fails at load time with
+`libuv.so.1: cannot open shared object file`. It was built with GCC 13.3 for x86-64 glibc, so a
+different distribution may also disagree about `libstdc++` symbol versions.
+
+`./build_project_linux.sh` is the supported path and always works: it builds libuv from the bundled
+tarball, configures CMake, compiles, and runs the tests in one command. The Windows client is
+statically linked and the Linux server is not, which is deliberate rather than an oversight —
+shipping `client.exe` meant shipping `uv.dll` beside it, and linking it in removed a file the user
+could lose, whereas on Linux the build script is how the server is expected to be produced.
 
 ### If Windows refuses to run client.exe
 
