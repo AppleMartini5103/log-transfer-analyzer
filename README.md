@@ -1,12 +1,22 @@
 # log-transfer-analyzer
 
-A client-server system for transferring and analyzing large log files. A client streams a ~500 MB
-log file to a Linux C++17 server over TCP; the server parses the stream **while receiving it**,
-keeps its whole process footprint far under 50 MB, skips corrupted lines without crashing, and
+A client-server system for transferring and analyzing large log files. A Windows GUI client streams
+a ~500 MB log file to a Linux C++17 server over TCP; the server parses the stream **while receiving
+it**, keeps its whole process footprint far under 50 MB, skips corrupted lines without crashing, and
 returns the statistics as `result.csv`.
 
-Measured on the reference log (483 MB, 3,483,528 lines): **peak RSS 8.4 MB**, 26 corrupted lines
-skipped, full round trip in 1.3 s over loopback.
+Measured on the reference log (483 MB, 3,483,528 lines):
+
+| | |
+|---|---|
+| Server peak RSS | **8.4 MB** — 17% of the 50 MB limit, independent of file size |
+| Corrupted lines | 26, skipped and reported |
+| Throughput | **11.3 MB/s** over 100 Mb/s (95% of line rate); **~97 MiB/s** over a 1 Gb/s direct link |
+| Client memory | 49.5 MB idle, 98.5 MB during a 483 MB transfer — also independent of file size |
+| Deliverable | a single `client.exe`; no DLLs, no VC++ redistributable |
+
+Both throughput figures sit near the link ceiling, so the network is the bound rather than either
+program. The loopback E2E driver completes the same round trip in 1.3 s.
 
 ---
 
@@ -18,10 +28,10 @@ skipped, full round trip in 1.3 s over loopback.
 |---|---|---|
 | Compiler | GCC 9+ / Clang 10+ (C++17) | MSVC 2019+ (C++17) |
 | Build system | CMake 3.16+ | CMake 3.16+ |
-| Other | `tar`, `g++`, POSIX | "x64 Native Tools Command Prompt" |
+| Other | `tar`, `g++`, POSIX | none - the build script enters the MSVC environment itself |
 
-No package installation is required. libuv and Catch2 ship as source tarballs under `3rdparty/`
-and are built by the scripts below.
+No package installation is required. libuv, Catch2 and Dear ImGui ship as source tarballs under
+`3rdparty/` and are built by the scripts below.
 
 ### One command
 
@@ -34,9 +44,14 @@ The script builds the third-party libraries from their tarballs if they are miss
 CMake in `build/`, compiles, and runs the unit tests. Outputs:
 
 ```
-build/server/server        # server binary
-build/tests/unit_tests     # unit test runner
+build/server/server                  # server binary (Linux)
+build/client/Release/client.exe      # client (Windows)
+build/tests/unit_tests               # unit test runner
 ```
+
+`client.exe` is self-contained: libuv and the MSVC runtime are linked in, so it runs on a clean
+Windows machine with nothing beside it. `dumpbin /DEPENDENTS` lists only DLLs that ship with the
+OS. The server binary is dynamically linked against the system libuv build in `3rdparty/`.
 
 ### Manual build
 
@@ -51,15 +66,28 @@ ctest --test-dir build --output-on-failure
 `3rdparty/*/include/` and `lib/` are generated, not committed — the tarball plus the build script
 is the source of truth.
 
-### Sanitizer build
+### Sanitizer builds
+
+Two configurations, deliberately exclusive — ASan and TSan intercept memory access in incompatible
+ways, so enabling both is a hard CMake error rather than a silently dropped flag:
 
 ```bash
-cmake -B build-asan -DENABLE_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-asan -j && ./build-asan/tests/unit_tests
+cmake -B build-asan -DENABLE_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug   # ASan + UBSan
+cmake -B build-tsan -DENABLE_TSAN=ON       -DCMAKE_BUILD_TYPE=Debug   # ThreadSanitizer
 ```
 
-AddressSanitizer + UndefinedBehaviorSanitizer. The full suite passes clean; this configuration
-caught a dangling `string_view` during development that ordinary tests did not.
+Each prints a `Sanitizers: ... ENABLED` line when it takes effect; the absence of that line is the
+signal that the flag did not apply. Confirm the binary too — `ldd ./build-tsan/tests/unit_tests |
+grep libtsan` — because the status line proves configure-time intent, not the artifact.
+
+Both pass clean on the full suite: ASan reports no leaks, TSan reports no races over four runs with
+randomized test order. ASan caught a dangling `string_view` during development that ordinary tests
+did not.
+
+On Ubuntu 24.04 TSan aborts at startup with `unexpected memory mapping`, because the distribution
+raised ASLR entropy past what TSan's fixed shadow layout assumes. Run it under
+`setarch $(uname -m) -R` to disable ASLR for that process; lowering `vm.mmap_rnd_bits` system-wide
+would also work but weakens ASLR for the whole machine.
 
 ---
 
@@ -174,7 +202,7 @@ keepalive, whose kernel defaults are measured in hours.
 
 ### 3.3 Concurrency model
 
-Two threads, fixed at startup:
+The **server** runs two threads, fixed at startup:
 
 | Thread | Owns | Sleeps on | Woken by |
 |---|---|---|---|
@@ -197,6 +225,24 @@ handlers are idempotent.
 Because the statistics belong to the parser thread, the CSV is also built there and only the
 finished buffer is handed to the loop. Keeping that boundary intact is what removes the need for
 shared ownership at the end of a session.
+
+The **client** runs three, for the same reason the server runs two — the thread that must never
+block is kept clear of everything that can:
+
+| Thread | Owns | Blocks on |
+|---|---|---|
+| UI (main) | ImGui/DX11 frame loop, `UiState` | nothing — it polls a queue and returns |
+| libuv loop | socket, timers, upload pacing, CRC | epoll/IOCP |
+| file reader | the 64 KB read into ring slots | disk I/O |
+
+The reader exists because reading 500 MB from disk is the one operation that can stall for tens of
+milliseconds at a time. Doing it on the loop thread would delay socket callbacks; doing it on the
+UI thread would freeze the window, which the assignment explicitly forbids. Commands travel
+UI → loop through a mutex-guarded queue plus `uv_async_send`, and events travel back through a
+second queue that the UI drains once per frame. No UI code ever waits on a worker.
+
+Verified rather than argued: sampling `IsHungAppWindow` — the same check Windows uses to decide
+whether to paint "Not Responding" — every 500 ms across a 483 MB transfer produced zero hits.
 
 ### 3.4 One session at a time
 
@@ -228,7 +274,48 @@ threads would leave the child with locked mutexes and nobody to unlock them.
 
 ---
 
-## 4. Memory optimization strategy
+## 4. The client
+
+![client after a completed transfer](client/docs/client-result.jpg)
+
+The screenshot is the finished state of a 483 MB transfer, and it shows the one combination that
+needs explaining: the indicator reads **Disconnected** while **Save** is enabled.
+
+That is not a bug, it is the protocol. The server serves one session at a time, so the moment it
+sends the last CSV byte and receives the acknowledgement it closes the connection to free itself
+for the next client. The result already lives in the client's memory, verified by CRC. Gating Save
+on an open connection would therefore make it a button nobody could ever press — the server closes
+faster than a human reacts. The `State:` line says so in words rather than leaving the user to
+infer it.
+
+**One axis, not two.** Every control is gated on the *actual* link state plus the session state.
+An earlier design added a separate "intent" axis, which produced cells like "shows Disconnected but
+Connect is greyed out" — the user then has to work out which button applies. Treating a dropped
+link as a disconnection means the window only ever tells one story: grey, and only Connect is
+available; green, and Send and Disconnect are.
+
+**Browse is always enabled** because picking a file is a local operation. It also makes the natural
+order "choose file, connect, send immediately", which keeps the server's 120-second header timeout
+from ever being relevant.
+
+**Send asks first.** A 483 MB upload is effectively irreversible: cancelling still consumes a server
+session and discards the transferred bytes. The dialog names the file, its size and the
+destination, so the confirmation is about *this* transfer rather than a generic "are you sure".
+
+**Ping is delegated to the OS.** The button launches `ping -t` in its own console window rather
+than implementing ICMP in-process. The first version did implement it, drawing replies into a panel
+inside the client window, and two problems showed up immediately: the panel could not be moved out
+of the way because it was confined to the client's own window, and the replies scrolled past faster
+than they could be read. A console window is resizable, scrollable, movable to a second monitor,
+and keeps running while the user goes back to transferring. The IP is validated as four numeric
+octets before it reaches the shell, since the address ends up on a command line.
+
+Measuring confirmed the delegation has a second benefit: pinging an unreachable address produced
+no UI stall at all, because the waiting happens in a different process entirely.
+
+---
+
+## 5. Memory optimization strategy
 
 The requirement is a process-wide ceiling, so every buffer in the process is bounded — a bound on
 the queue alone would be defeated by any unbounded buffer downstream.
@@ -240,7 +327,8 @@ the queue alone would be defeated by any unbounded buffer downstream.
 | Header framing | 273 B | largest possible message |
 | Skip report samples | 100 lines × 200 B | explicit caps |
 | Statistics map | 10,000 entries | entry limit |
-| Result CSV | a few KB | derived from bucket count |
+| Result CSV (build side) | ~5 KB in practice | 10,000 entries x 57 B row = 557 KB absolute ceiling |
+| Result CSV (receive side) | **4 MiB** | `kMaxCsvSize`, checked before the buffer is reserved |
 
 **Zero-copy receive.** libuv asks the application for a buffer before every read. Instead of
 allocating one, the session hands back an empty ring slot, so bytes land directly in the queue the
@@ -285,9 +373,31 @@ configuration leaves it to kernel autotuning.
 Both figures are relative comparisons: the driver is written in Python and runs over loopback, so
 the absolute throughput reflects the harness as much as the server.
 
+**Client, measured with the real GUI over a real link:**
+
+| | Idle | During a 483 MB transfer |
+|---|---|---|
+| Working set | 49.5 MB | 98.5 MB |
+
+The ~49 MB baseline is ImGui + DX11 + Win32, not the transfer path. The delta is bounded by the
+same mechanism as the server: a 4 MB ring budget plus at most 8 in-flight 64 KB writes (0.5 MB),
+so peak memory does not track file size — a 5 GB file would show the same figures.
+
+**End-to-end over a real network**, client and server on separate machines:
+
+| Link | Time for 483 MB | Throughput | Share of line rate |
+|---|---|---|---|
+| 100 Mb/s switched | 42.6 s / 43.0 s (two runs) | 11.3 / 11.2 MB/s | 95% |
+| 1 Gb/s direct | ~5 s | ~97 MiB/s | 81% |
+
+Raising the in-flight write cap was considered and rejected: at both link speeds the transfer
+already runs at the ceiling the network allows, so the cap is not what limits it. That conclusion
+held on two links an order of magnitude apart, which is why it is recorded as settled rather than
+provisional.
+
 ---
 
-## 5. Corrupted data handling
+## 6. Corrupted data handling
 
 The reference log contains deliberately damaged lines. The parser must skip them, log them, and
 finish parsing every remaining line.
@@ -339,7 +449,7 @@ deliverable itself.
 
 ---
 
-## 6. Output format
+## 7. Output format
 
 `result.csv` has two blocks separated by a blank line, each with its own header row, so ordinary
 CSV readers can parse both:
@@ -362,7 +472,7 @@ A label line such as `[Task 1]` was rejected precisely because it breaks CSV par
 
 ---
 
-## 7. Tests
+## 8. Tests
 
 ```bash
 ctest --test-dir build --output-on-failure          # 165 unit tests
@@ -373,7 +483,7 @@ python3 tests/perf/sweep.py  --server build/server/server
 The end-to-end driver and the benchmark sweep use the Python standard library only — no
 installation step.
 
-**Unit tests (Catch2, 165 cases / 4,916 assertions)** cover the CRC vector
+**Unit tests (Catch2, 165 cases)** cover the CRC vector
 (`"123456789"` → `0xCBF43926`), codec round trips including every truncation point, framer
 accumulation, SPSC ring behaviour under two-thread contention, each validation stage with its own
 damaged-line fixture, and the session state machine driven over real loopback sockets.
@@ -393,7 +503,7 @@ regression: a shutdown deadlock in which the process never left its event loop.
 
 ---
 
-## 8. Repository layout
+## 9. Repository layout
 
 ```
 common/              shared by client and server (libuv + standard library only)
@@ -406,8 +516,12 @@ server/src/
   parser/            line reassembly, validation pipeline, parser thread, skip report
   stats/             per-module hourly counts, speed statistics
   csv/               result.csv builder
+client/src/          Windows GUI client (Dear ImGui + Win32/DX11)
+  app/               entry point, window, frame loop, wiring
+  service/           libuv worker thread, file reader thread, session state machine
+  ui/                UiState (gating), UiRenderer (drawing), file dialogs, ping console
 tests/               Catch2 unit tests, Python E2E driver, benchmark sweep
-3rdparty/            libuv and Catch2 source tarballs + build scripts
+3rdparty/            libuv, Catch2 and Dear ImGui source tarballs + build scripts
 ```
 
 `common/` depends on libuv and the standard library only — no OS headers and no `long`, so the same
