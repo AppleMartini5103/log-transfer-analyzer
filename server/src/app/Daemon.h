@@ -18,7 +18,11 @@ inline constexpr const char* kPidFilePath = "./server.pid";
 // main() 시작 직후 호출. 특수 채널(시그널)을 일반 경로로 전환하는 첫 단계 (총괄 원칙 ①)
 //  - SIGPIPE → SIG_IGN: 끊긴 소켓에 write하면 기본 동작이 프로세스 즉사다. 무시하면
 //    write 실패가 errno EPIPE로 돌아와 설계된 소켓 에러 → CLEANUP 경로에 자연 흡수된다.
-//    libuv가 내부적으로 처리하지만 라이브러리 내부 동작에 의존하지 않고 명시한다.
+//    이 호출은 보조 수단이 아니라 필수다. libuv의 uv__try_write는 MSG_NOSIGNAL 없는
+//    write(2)를 쓰므로 libuv가 대신 막아주지 않는다 — 실측으로 확인했다: 이 호출을 하지
+//    않는 테스트 바이너리가 강제 단절 시나리오에서 실제로 SIGPIPE로 즉사했다(이슈 46).
+//    (종전 주석은 "libuv가 내부적으로 처리하지만 명시한다"고 적어 이 호출을 지워도 되는
+//     것처럼 읽혔다. 전제는 common/net/TcpSocket.h에도 같은 내용으로 적혀 있다)
 //  - SIGHUP → SIG_IGN: 설정 리로드 기능이 없으므로 무시 (기본 동작은 프로세스 종료).
 //    포그라운드 실행 중 터미널을 닫아도 서버가 죽지 않는다.
 //    ※ SIGTERM/SIGINT는 여기서 다루지 않는다 — uv_signal_t로 루프 스레드에서 받는다
