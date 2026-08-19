@@ -614,3 +614,15 @@ tests/               Catch2 unit tests, Python E2E driver, benchmark sweep
 
 `common/` depends on libuv and the standard library only — no OS headers and no `long`, so the same
 sources compile under both MSVC and GCC.
+
+---
+
+## 10. License
+
+Copyright (c) 2026 Beomsik Kim. All rights reserved.
+
+This repository is published for review. It is not open source: copying, modifying,
+redistributing, or reusing this code in another project requires the author's permission.
+
+The `BYDA::` log format this parser handles was specified by the assignment and is not
+the author's work.
