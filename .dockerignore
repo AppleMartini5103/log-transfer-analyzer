@@ -1,0 +1,16 @@
+# COPY . . 이 호스트 빌드 잔재를 이미지로 끌고 들어가지 않게 한다.
+# 특히 3rdparty의 include/·lib/는 호스트에서 tarball로부터 생성된 산출물이라
+# 제외해야 컨테이너 안에서 항상 tarball부터 새로 빌드된다 (build_project_linux.sh는
+# include/가 이미 있으면 3rdparty 빌드를 건너뛴다).
+.git
+build/
+build-asan/
+build-tsan/
+logs/
+prime-agent/
+result.csv
+skip_report.txt
+3rdparty/libuv/include/
+3rdparty/libuv/lib/
+3rdparty/catch2/include/
+3rdparty/catch2/lib/
