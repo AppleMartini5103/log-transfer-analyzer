@@ -127,6 +127,32 @@ raised ASLR entropy past what TSan's fixed shadow layout assumes. Run it under
 `setarch $(uname -m) -R` to disable ASLR for that process; lowering `vm.mmap_rnd_bits` system-wide
 would also work but weakens ASLR for the whole machine.
 
+### Running with Docker (optional)
+
+`./build_project_linux.sh` on the host remains the supported path; the images exist so the server
+can be built and run reproducibly on a machine whose distribution differs from the one documented
+above. Two images under `docker/`, built in order from the repository root:
+
+```bash
+docker build -t log-server-base:latest -f docker/log-server-base.dockerfile .
+docker build -t log-server-app:latest  -f docker/log-server-app.dockerfile .
+docker run --rm -p 23507:23507 log-server-app:latest
+```
+
+The split follows change frequency: the base image holds what rarely changes (Ubuntu 24.04 — the
+same distribution the prebuilt binary was built on — plus the toolchain and the third-party
+libraries, built from the bundled tarballs), so editing server code rebuilds only the app image.
+The app image runs `build_project_linux.sh` itself, tests included: an image cannot exist unless
+the unit tests passed. No network access is needed during either build.
+
+The relocatability caveat above does not apply inside the image — the `RUNPATH` points at
+`/app/3rdparty/...`, and that path exists in every container started from the image. Run the
+server in the foreground and let `docker run -d` do the backgrounding; the server's own `-d` flag
+would end the container immediately, because the daemonizing double-fork exits the process Docker
+is watching. Artifacts stay inside the container by default; to collect them on the host, run with
+`-v "$(pwd)/out:/app/out" -w /app/out` and the command `../build/server/server`, which puts
+`result.csv`, `skip_report.txt`, and `logs/` in `./out`.
+
 ---
 
 ## 2. Running the server
