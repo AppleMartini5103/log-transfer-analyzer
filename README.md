@@ -589,7 +589,7 @@ A label line such as `[Task 1]` was rejected precisely because it breaks CSV par
 ## 8. Tests
 
 ```bash
-ctest --test-dir build --output-on-failure          # 167 unit tests
+ctest --test-dir build --output-on-failure          # 168 unit tests
 python3 tests/e2e/run_e2e.py --server build/server/server
 python3 tests/perf/sweep.py  --server build/server/server
 ```
@@ -597,14 +597,15 @@ python3 tests/perf/sweep.py  --server build/server/server
 The end-to-end driver and the benchmark sweep use the Python standard library only — no
 installation step.
 
-**Unit tests (Catch2, 167 cases)** cover the CRC vector
+**Unit tests (Catch2, 168 cases)** cover the CRC vector
 (`"123456789"` → `0xCBF43926`), codec round trips including every truncation point, framer
 accumulation, SPSC ring behaviour under two-thread contention, each validation stage with its own
 damaged-line fixture, and the session state machine driven over real loopback sockets. Three of the
 four state timers are covered directly — a stalled upload in `RECEIVING`, a ghost connection in
 `WAIT_HEADER`, and a client that never acknowledges in `WAIT_DONE` — and each asserts that the next
 connection is served afterwards, because on a 1:1 server a timer that fails to reap does not leak a
-session, it stops the server.
+session, it stops the server. On the client side, a server that rejects an upload is covered for all
+four Ack statuses, asserting the reason reaches the log rather than the session failing silently.
 
 **End-to-end scenarios (15)** run against the real server binary and speak the protocol from an
 independent Python implementation — deliberately not reusing the server's own codec, and using
