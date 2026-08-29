@@ -350,3 +350,112 @@ TEST_CASE("session: second connection waits in backlog, then is served (1:1 poli
     REQUIRE(proto::decode(second.received, ack) == proto::DecodeStatus::Ok);
     REQUIRE(ack.status == proto::AckStatus::Ok);
 }
+
+// ── 상태별 타임아웃 (design 9번) ─────────────────────────────────────────────
+//
+// design 9번은 네 상태에 타이머를 붙였는데, 그중 WAIT_HEADER만 검증되어 있었다.
+// 나머지가 중요한 이유는 서버가 1:1이기 때문이다 — 유령 세션 하나가 정리되지 않으면
+// 서버 전체가 다음 클라이언트를 영구히 받지 못한다. 즉 타이머의 실패는 "세션이 안 끝난다"가
+// 아니라 "서버가 멈춘다"이고, 그래서 각 테스트는 종료뿐 아니라 accept 재개까지 확인한다.
+//
+// [어느 타이머가 발동했는지 어떻게 가리는가]
+//   hasActiveSession()은 WAIT_HEADER와 RECEIVING에서 똑같이 참이라, 그냥 침묵하면
+//   WAIT_HEADER 타임아웃을 다시 테스트하는 것과 구별되지 않는다. 그래서 두 타이머의 길이를
+//   비대칭으로 주입한다: 검증 대상만 짧게, 나머지는 충분히 길게. 빠르게 닫혔다면 짧은 쪽
+//   말고는 설명이 되지 않으므로 어느 타이머가 일했는지가 결정된다.
+//   (커밋 [37]에서 "정지가 실제로 성립했는지"를 단정하지 않아 헤맸던 것과 같은 교훈이다)
+
+namespace {
+
+// 타임아웃만 바꿔 매니저를 다시 세운다 (Fixture 생성자가 기본값으로 만들기 때문).
+// WAIT_HEADER 타임아웃 테스트가 쓰는 방식과 같다.
+void restartWithTimeouts(Fixture& fixture, std::uint64_t idleMs, std::uint64_t responseMs) {
+    fixture.manager.reset();
+    SessionTimeouts tuned;
+    tuned.idleMs = idleMs;
+    tuned.responseMs = responseMs;
+    fixture.manager =
+        std::make_unique<SessionManager>(&fixture.loop, kTestChunkSize, kTestRingSlots, 0, tuned);
+    std::string error;
+    REQUIRE(fixture.manager->startParser(error));
+    REQUIRE(fixture.manager->listen("127.0.0.1", 0, 128) == 0);
+    fixture.port = fixture.manager->boundPort();
+    REQUIRE(fixture.port != 0);
+}
+
+}  // namespace
+
+TEST_CASE("session: RECEIVING idle timeout releases a stalled upload") {
+    // 케이블이 뽑히거나 상대 프로세스가 멈추면 소켓 에러가 오지 않는다 — 조용히 멈출 뿐이다.
+    // 강제 단절 테스트는 에러가 즉시 오는 경우를 다루므로 이 경로를 대신하지 못한다.
+    Fixture fixture;
+    // idle만 짧게. response가 길므로 빨리 닫혔다면 RECEIVING의 idle 타이머다.
+    restartWithTimeouts(fixture, 60, 5000);
+
+    TestClient client{&fixture.loop};
+    REQUIRE(client.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return client.connectDone; }));
+    REQUIRE(client.socket.startRead() == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->hasActiveSession(); }));
+
+    // 헤더는 보내되 페이로드는 일부만 보내고 침묵한다 — 서버는 RECEIVING에 남는다.
+    const std::string payload = "[2026-06-19_22:00:00.000000][7710][30482][1] BYDA::X: y\n";
+    REQUIRE(client.socket.send(asString(headerBytes(payload.size(), "stalled.log"))) == 0);
+    REQUIRE(client.socket.send(payload.substr(0, 10)) == 0);
+
+    REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->completedSessions() == 1; }, 3000));
+    REQUIRE_FALSE(fixture.manager->hasActiveSession());
+    // 업로드가 완료된 것이 아니라 타이머로 끝났다는 증거 — 완주했다면 Ack가 왔을 것이다.
+    REQUIRE(client.received.empty());
+
+    // 1:1 서버의 실질 요구: 정리 후 다음 연결을 받을 수 있어야 한다.
+    TestClient next{&fixture.loop};
+    REQUIRE(next.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return next.connectDone; }));
+    REQUIRE(next.socket.startRead() == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->hasActiveSession(); }));
+}
+
+TEST_CASE("session: WAIT_DONE timeout releases a client that never acknowledges") {
+    // 결과까지 받아간 뒤 DownloadDone을 보내지 않고 사라지는 클라이언트.
+    // 서버는 CLEANUP까지 스스로 진행해야 다음 연결을 받을 수 있다 (design 11번).
+    Fixture fixture;
+    // WAIT_HEADER도 같은 responseMs 손잡이를 쓰므로 60ms처럼 짧게 잡으면 헤더를 보내기 전에
+    // 세션이 WAIT_HEADER에서 죽을 수 있다. 500ms는 연결+헤더 송신(루프백에서 수 ms)보다
+    // 충분히 길고 테스트 상한 3000ms보다 짧다.
+    // 어느 상태에서 발동했는지는 타이머 길이가 아니라 관측으로 가른다: CSV를 끝까지 받았다는
+    // 것이 SENDING_RESULT를 지나 WAIT_DONE에 도달했다는 증거다.
+    restartWithTimeouts(fixture, 5000, 500);
+
+    TestClient client{&fixture.loop};
+    REQUIRE(client.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return client.connectDone; }));
+    REQUIRE(client.socket.startRead() == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->hasActiveSession(); }));
+
+    const std::string payload = "[2026-06-19_22:00:00.000000][7710][30482][1] BYDA::X: y\n";
+    REQUIRE(client.socket.send(asString(headerBytes(payload.size(), "nodone.log"))) == 0);
+    REQUIRE(client.socket.send(payload) == 0);
+    REQUIRE(client.socket.send(asString(trailerBytes(common::crc32(0, payload)))) == 0);
+
+    // 결과를 끝까지 받는다 = WAIT_DONE에 도달했다는 관측 가능한 증거
+    REQUIRE(runUntil(&fixture.loop, [&] {
+        return client.received.size() >= proto::kAckSize + proto::kResultHeaderSize;
+    }));
+    proto::ResultHeader result;
+    const std::string_view afterAck = std::string_view{client.received}.substr(proto::kAckSize);
+    REQUIRE(proto::decode(afterAck, result) == proto::DecodeStatus::Ok);
+    REQUIRE(runUntil(&fixture.loop, [&] {
+        return client.received.size() >= proto::kAckSize + proto::kResultHeaderSize + result.csvSize;
+    }));
+
+    // DownloadDone을 보내지 않는다 — 타이머가 세션을 끝내야 한다.
+    REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->completedSessions() == 1; }, 3000));
+    REQUIRE_FALSE(fixture.manager->hasActiveSession());
+
+    TestClient next{&fixture.loop};
+    REQUIRE(next.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return next.connectDone; }));
+    REQUIRE(next.socket.startRead() == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->hasActiveSession(); }));
+}
