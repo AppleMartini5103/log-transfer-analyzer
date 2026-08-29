@@ -589,7 +589,7 @@ A label line such as `[Task 1]` was rejected precisely because it breaks CSV par
 ## 8. Tests
 
 ```bash
-ctest --test-dir build --output-on-failure          # 165 unit tests
+ctest --test-dir build --output-on-failure          # 167 unit tests
 python3 tests/e2e/run_e2e.py --server build/server/server
 python3 tests/perf/sweep.py  --server build/server/server
 ```
@@ -597,10 +597,14 @@ python3 tests/perf/sweep.py  --server build/server/server
 The end-to-end driver and the benchmark sweep use the Python standard library only — no
 installation step.
 
-**Unit tests (Catch2, 165 cases)** cover the CRC vector
+**Unit tests (Catch2, 167 cases)** cover the CRC vector
 (`"123456789"` → `0xCBF43926`), codec round trips including every truncation point, framer
 accumulation, SPSC ring behaviour under two-thread contention, each validation stage with its own
-damaged-line fixture, and the session state machine driven over real loopback sockets.
+damaged-line fixture, and the session state machine driven over real loopback sockets. Three of the
+four state timers are covered directly — a stalled upload in `RECEIVING`, a ghost connection in
+`WAIT_HEADER`, and a client that never acknowledges in `WAIT_DONE` — and each asserts that the next
+connection is served afterwards, because on a 1:1 server a timer that fails to reap does not leak a
+session, it stops the server.
 
 **End-to-end scenarios (15)** run against the real server binary and speak the protocol from an
 independent Python implementation — deliberately not reusing the server's own codec, and using
@@ -609,7 +613,7 @@ cover the happy path, an empty file, eleven kinds of damaged data (five observed
 log plus six the design had never seen), CRC mismatch, protocol violations of both classes, a
 header split byte by byte, abrupt disconnection during upload and during result delivery, backlog
 behaviour with two clients, peak RSS under the limit, and daemon mode. Two further scenarios are
-opt-in because they are slow: the full 483 MB log (`--log <path>`) and the 120-second idle timeout
+opt-in because they are slow: the full 483 MB log (`--log <path>`) and the 120-second header timeout
 (`--slow`).
 
 Every scenario also asserts that the server exits cleanly afterwards. That check found a real
