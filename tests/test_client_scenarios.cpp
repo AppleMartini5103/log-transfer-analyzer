@@ -79,6 +79,7 @@ public:
         AckThenDrop,      // Ack만 보내고 끊는다 (WAIT_RESULT 중 단절)
         FullResult,       // Ack + ResultHeader + CSV — 정상 완주
         OversizedResult,  // ResultHeader에 상한 초과 csvSize를 선언한다 (본문은 보내지 않는다)
+        RejectUpload,     // 실패 사유를 담은 Ack를 보내고 닫는다 (design 8번: 사유를 알리고 종료)
     };
 
     explicit FakeServer(uv_loop_t* loop) : _listener(loop) {}
@@ -165,6 +166,7 @@ public:
     bool dropOnFirstPayload = false;
     bool stallAfterHeader = false;
     std::uint64_t uploadSize = kSmallUpload;
+    proto::AckStatus rejectStatus = proto::AckStatus::CrcMismatch;  // RejectUpload일 때 실을 사유
     std::string csv = "module,hour,count\nRadarTrackNodeState,2026-06-19 22,7\n";
 
     std::string received;
@@ -188,6 +190,17 @@ private:
 
     void respond() {
         if (policy == OnUploadComplete::DropSilently) {
+            closeAccepted();
+            return;
+        }
+
+        if (policy == OnUploadComplete::RejectUpload) {
+            // 실서버는 조용히 끊지 않고 사유를 담은 Ack를 보낸 뒤 닫는다
+            // (design 8번 근거 3: 클라이언트 로그에 원인이 찍혀야 "왜 죽었지?"가 되지 않는다).
+            proto::Ack rejected;
+            rejected.status = rejectStatus;
+            rejected.receivedBytes = uploadSize;
+            sendBytes(proto::encode(rejected));
             closeAccepted();
             return;
         }
@@ -684,6 +697,49 @@ TEST_CASE("client scenario: an oversized declared csvSize is rejected, not alloc
 
     // 거부했으므로 저장할 결과는 없다 (Done으로 가지 않았다)
     REQUIRE(harness.service.takeResultCsv().empty());
+}
+
+TEST_CASE("client scenario: a failure Ack is reported with its reason and unlocks the UI") {
+    // 서버가 업로드를 거부하는 경로. 구현은 TransferService에 있었지만 한 번도 실행된 적이
+    // 없었다 — FakeServer가 언제나 AckStatus::Ok만 보냈기 때문이다. 서버 쪽은 test_session이
+    // CrcMismatch·ProtocolError 응답을 이미 검증하는데 클라이언트 쪽만 비어 있었다.
+    //
+    // 네 상태를 모두 도는 이유: 사유 문자열이 상태마다 다르고, 그것이 design 8번 근거 3의
+    // 요구다 — 사용자가 "왜 실패했는지"를 로그에서 읽을 수 있어야 한다. SizeMismatch인데
+    // "CRC mismatch"라고 찍히면 통과하지만 요구는 깨진다. 매핑까지 봐야 하는 이유다.
+    struct Case {
+        proto::AckStatus status;
+        const char* reason;
+    };
+    const Case cases[] = {
+        {proto::AckStatus::CrcMismatch, "CRC mismatch"},
+        {proto::AckStatus::SizeMismatch, "size mismatch"},
+        {proto::AckStatus::ProtocolError, "protocol error"},
+        {proto::AckStatus::ServerError, "server error"},
+    };
+
+    for (const Case& c : cases) {
+        INFO("status=" << static_cast<int>(c.status) << " expecting reason '" << c.reason << "'");
+        Harness harness;
+        harness.server->policy = FakeServer::OnUploadComplete::RejectUpload;
+        harness.server->rejectStatus = c.status;
+
+        harness.connect();
+        harness.startUpload();
+
+        const bool reusable = harness.waitForReusable();
+        INFO("link=" << static_cast<int>(harness.link) << " session="
+                     << static_cast<int>(harness.session) << " logs:" << harness.allLogs());
+        REQUIRE(reusable);
+        requireReusableIdleState(harness);
+
+        // 사유가 그대로 노출되어야 한다 — 조용히 실패하면 사용자는 원인을 알 수 없다
+        REQUIRE(harness.sawLog(std::string("Server rejected the upload: ") + c.reason));
+        REQUIRE(harness.errorLogs > 0);
+
+        // 거부됐으므로 저장할 결과가 없다
+        REQUIRE(harness.service.takeResultCsv().empty());
+    }
 }
 
 TEST_CASE("client scenario: quitting mid-upload joins every thread cleanly") {
