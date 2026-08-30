@@ -19,7 +19,7 @@ echo ========================================
 echo log-transfer-analyzer Build (Windows)
 echo ========================================
 
-echo [0/3] Checking MSVC toolchain...
+echo [0/3] Checking toolchain...
 where cl >nul 2>nul
 if not errorlevel 1 goto :toolchain_ready
 
@@ -62,6 +62,34 @@ for /f "delims=" %%c in ('where cl') do (
     goto :toolchain_reported
 )
 :toolchain_reported
+
+REM cl.exe being present does not mean CMake is. vcvars64.bat does not put the
+REM CMake that ships with Visual Studio on PATH unless the "C++ CMake tools for
+REM Windows" component is installed, so a developer prompt can have a compiler and
+REM no generator. Without this check the build reaches [2/3] and dies on cmd's bare
+REM "'cmake' is not recognized", with 3rdparty already rebuilt for nothing.
+REM 3rdparty\libuv\build_window.bat checks too, but step [1/3] skips it once
+REM 3rdparty\libuv\include exists - so any second run would arrive unguarded.
+where cmake >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo [ERROR] CMake not found in PATH. Version 3.16 or newer is required.
+    echo         Install it with any one of:
+    echo           winget install Kitware.CMake
+    echo           choco install cmake
+    echo         or tick "C++ CMake tools for Windows" in the Visual Studio
+    echo         Installer ^(Individual components^), or download it from
+    echo         https://cmake.org/download/
+    echo.
+    echo         Reopen the terminal afterwards so PATH is picked up.
+    echo.
+    exit /b 1
+)
+for /f "delims=" %%c in ('where cmake') do (
+    echo   cmake.exe: %%c
+    goto :cmake_reported
+)
+:cmake_reported
 
 if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
     echo [WARN] Only x64 has been verified; detected %PROCESSOR_ARCHITECTURE%. Continuing...
