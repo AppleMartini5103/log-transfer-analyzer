@@ -141,31 +141,48 @@ raised ASLR entropy past what TSan's fixed shadow layout assumes. Run it under
 `setarch $(uname -m) -R` to disable ASLR for that process; lowering `vm.mmap_rnd_bits` system-wide
 would also work but weakens ASLR for the whole machine.
 
-### Running with Docker (optional)
+### Running with Docker
 
 `./build_project_linux.sh` on the host remains the supported path; the images exist so the server
 can be built and run reproducibly on a machine whose distribution differs from the one documented
-above. Two images under `docker/`, built in order from the repository root:
+above. Two commands from the repository root:
 
 ```bash
-docker build -t log-server-base:latest -f docker/log-server-base.dockerfile .
-docker build -t log-server-app:latest  -f docker/log-server-app.dockerfile .
-docker run --rm -p 23507:23507 log-server-app:latest
+./docker/build_images.sh          # base, then app
+docker compose up                 # port 23507; artifacts land in ./out
 ```
 
-The split follows change frequency: the base image holds what rarely changes (Ubuntu 24.04 — the
-same distribution the prebuilt binary was built on — plus the toolchain and the third-party
-libraries, built from the bundled tarballs), so editing server code rebuilds only the app image.
-The app image runs `build_project_linux.sh` itself, tests included: an image cannot exist unless
-the unit tests passed. No network access is needed during either build.
+Building is a script and running is compose, and the split is not arbitrary. The app image
+references the base with `FROM log-server-base:latest`, so the two have to be built in that order —
+starting with the app image fails with `log-server-base:latest not found`. Compose cannot enforce
+that: `depends_on` orders service *startup*, not image builds. The script guarantees the order;
+compose declares the run conditions. It also reuses an existing base image unless you pass
+`--rebuild-base`, which is the point of the split: the base holds Ubuntu 24.04 — the same
+distribution the prebuilt binary was built on — plus the toolchain and the third-party libraries
+built from the bundled tarballs, none of which a server-code change affects.
 
-The relocatability caveat above does not apply inside the image — the `RUNPATH` points at
-`/app/3rdparty/...`, and that path exists in every container started from the image. Run the
-server in the foreground and let `docker run -d` do the backgrounding; the server's own `-d` flag
-would end the container immediately, because the daemonizing double-fork exits the process Docker
-is watching. Artifacts stay inside the container by default; to collect them on the host, run with
-`-v "$(pwd)/out:/app/out" -w /app/out` and the command `../build/server/server`, which puts
-`result.csv`, `skip_report.txt`, and `logs/` in `./out`.
+The app image runs `build_project_linux.sh` itself, tests included, so an image cannot exist unless
+the unit tests passed. It then runs `server -h` as a smoke test: if the loader cannot resolve libuv
+or libstdc++, the build fails there rather than leaving the failure for `docker run` to discover.
+The base image needs network access for `apt-get`; nothing else is fetched.
+
+The `$ORIGIN` runpath described above works unchanged inside the image. Its second entry resolves
+to `/app/3rdparty/libuv/lib/linux/async`, and the build path is fixed at `/app` in every container
+started from the image.
+
+Artifacts — `result.csv`, `skip_report.txt` and `logs/` — are written relative to the working
+directory, which the image sets to `/app/out`. The bind mount in `compose.yaml` maps that to `./out`
+on the host, so one line collects all three. Without it they would vanish with the container.
+
+Two things worth knowing. The container runs the server in the foreground: its own `-d` flag would
+end the container immediately, because the daemonizing double-fork exits the process Docker is
+watching — let `docker compose up -d` do the backgrounding instead. And because file logging is
+only enabled in daemon mode, a foreground container writes its log to stdout where `docker compose
+logs` picks it up, so `./out/logs/` stays empty unless you pass `-d` to the server yourself.
+
+Files in `./out` are owned by root, because the container runs as root. That is fine for reading
+them; to own them yourself, run
+`docker compose run --service-ports --user "$(id -u):$(id -g)" server`.
 
 ---
 
