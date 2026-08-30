@@ -95,20 +95,21 @@ if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
     echo [WARN] Only x64 has been verified; detected %PROCESSOR_ARCHITECTURE%. Continuing...
 )
 
-REM 하위 3rdparty 스크립트는 단독 실행(탐색기 더블클릭)을 위해 에러 경로마다
-REM pause를 둔다. 여기서 부를 때는 사람이 지켜보고 있지 않으므로 그 대기가
-REM "한 명령으로 끝난다"는 약속을 깨고, 비대화형 실행에서는 무한 대기가 된다.
-REM 이 변수로 "부모가 부른 것"임을 알린다 — 자식의 setlocal은 이 시점의
-REM 환경을 물려받으므로 그대로 보인다.
+REM The 3rdparty scripts pause on their error paths so that a double-click from
+REM Explorer leaves the message on screen. Nobody is watching when they are called
+REM from here, so that wait breaks the "one command" promise and hangs forever in a
+REM non-interactive run. This variable tells them the parent is driving; the child's
+REM setlocal inherits the environment as it stands here, so the variable is visible.
 set "LTA_UNATTENDED=1"
 
-REM 낡은 CMake 캐시 가드. CMakeCache.txt에는 소스·빌드 디렉토리의 절대 경로가
-REM 박히므로, 리포를 옮기거나 이름을 바꾸면 configure가 캐시를 거부한다. CMake의
-REM 메시지만으로는 원인이 "이전 빌드 트리가 남아 있다"는 것임을 알기 어렵다.
+REM Stale CMake cache guard. CMakeCache.txt records the absolute source and build
+REM directories, so moving or renaming the repository makes configure refuse the
+REM cache with a message that never says the leftover build tree is the cause.
 REM
-REM ★ 구분자를 맞춰야 한다: CMake는 캐시에 C:/Source/... 처럼 슬래시로 적는데
-REM   %CD%는 C:\Source\... 처럼 역슬래시를 준다. 그대로 비교하면 항상 불일치다.
-REM   Windows 경로는 대소문자를 구분하지 않으므로 if /i 로 비교한다.
+REM The separators must be normalised first: CMake writes the cached path with
+REM forward slashes while CD gives backslashes, so comparing them as they are would
+REM never match and would block every build. Windows paths are case-insensitive,
+REM hence if /i.
 if exist "build\CMakeCache.txt" (
     set "CACHED_HOME="
     for /f "usebackq tokens=1,* delims==" %%a in (`findstr /b /c:"CMAKE_HOME_DIRECTORY:INTERNAL=" "build\CMakeCache.txt"`) do set "CACHED_HOME=%%b"
