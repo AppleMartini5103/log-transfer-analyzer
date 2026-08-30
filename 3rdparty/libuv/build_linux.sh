@@ -27,6 +27,9 @@ if ! command -v cmake &> /dev/null; then
     echo "  Fedora:        sudo dnf install cmake"
     echo "  Arch:          sudo pacman -S cmake"
     echo ""
+    echo "Or let the project installer work out the package names for you:"
+    echo "  ../../install_deps_linux.sh"
+    echo ""
     echo "After installation, run this script again."
     echo ""
     exit 1

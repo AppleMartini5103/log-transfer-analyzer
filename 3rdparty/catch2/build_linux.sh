@@ -28,6 +28,9 @@ if ! command -v g++ &> /dev/null; then
     echo "  Fedora:        sudo dnf install gcc-c++"
     echo "  Arch:          sudo pacman -S gcc"
     echo ""
+    echo "Or let the project installer work out the package names for you:"
+    echo "  ../../install_deps_linux.sh"
+    echo ""
     echo "After installation, run this script again."
     exit 1
 fi
