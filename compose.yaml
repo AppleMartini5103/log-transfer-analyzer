@@ -1,0 +1,30 @@
+# 빌드된 app 이미지를 실행한다. 이미지 빌드는 docker/build_images.sh가 맡는다:
+#
+#   ./docker/build_images.sh
+#   docker compose up
+#
+# 빌드를 compose에 맡기지 않는 이유: app 이미지는 FROM log-server-base로 base를
+# 참조하는데, compose의 depends_on은 서비스 기동 순서를 다룰 뿐 이미지 빌드 순서를
+# 보장하지 않는다. 순서가 반드시 지켜져야 하는 일은 스크립트가 확실히 처리하고,
+# compose는 실행 조건(포트·마운트)만 선언한다.
+#
+# 서버는 포그라운드로 뜨고 로그가 이 터미널에 나온다. 종료는 Ctrl+C.
+# 클라이언트(Windows)에서는 이 머신의 IP와 포트 23507로 접속한다.
+
+services:
+  server:
+    image: log-server-app:latest
+    container_name: log-server
+    ports:
+      - "23507:23507"
+    volumes:
+      # 컨테이너의 작업 디렉토리(/app/out)를 호스트 ./out에 연결한다.
+      # 이 한 줄이 없으면 result.csv와 skip_report.txt가 컨테이너와 함께 사라진다.
+      - ./out:/app/out
+    # 컨테이너는 root로 실행되므로 ./out에 생기는 파일도 root 소유가 된다.
+    # 읽기·채점에는 지장이 없다(기본 umask 022 → 644). 소유자를 맞추려면
+    # `docker compose run --service-ports --user "$(id -u):$(id -g)" server`.
+    #
+    # 서버는 SIGTERM을 받으면 진행 중인 세션을 정리하고 내려간다. 기본 10초로는
+    # 500MB 분석 도중 강제 종료될 수 있어 여유를 준다.
+    stop_grace_period: 30s
