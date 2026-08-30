@@ -95,3 +95,7 @@ client_scenario_*.bin
 # Python bytecode (E2E test driver)
 __pycache__/
 *.py[cod]
+
+# Docker artifact directory (compose.yaml binds ./out to the container's workdir)
+out/
+logs/
