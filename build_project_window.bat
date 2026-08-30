@@ -95,6 +95,13 @@ if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
     echo [WARN] Only x64 has been verified; detected %PROCESSOR_ARCHITECTURE%. Continuing...
 )
 
+REM 하위 3rdparty 스크립트는 단독 실행(탐색기 더블클릭)을 위해 에러 경로마다
+REM pause를 둔다. 여기서 부를 때는 사람이 지켜보고 있지 않으므로 그 대기가
+REM "한 명령으로 끝난다"는 약속을 깨고, 비대화형 실행에서는 무한 대기가 된다.
+REM 이 변수로 "부모가 부른 것"임을 알린다 — 자식의 setlocal은 이 시점의
+REM 환경을 물려받으므로 그대로 보인다.
+set "LTA_UNATTENDED=1"
+
 echo [1/3] Checking 3rdparty libraries...
 for %%L in (libuv catch2 imgui) do (
     if not exist "3rdparty\%%L\include" (

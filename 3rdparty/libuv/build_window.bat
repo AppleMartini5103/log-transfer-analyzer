@@ -34,7 +34,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
     echo After installation, restart your terminal and run this script again.
     echo.
-    pause
+    if not defined LTA_UNATTENDED pause
     exit /b 1
 )
 
@@ -52,7 +52,7 @@ REM 1. Check tar.gz file
 if not exist "%TAR_GZ_FILE%" (
     echo [ERROR] %TAR_GZ_FILE% not found!
     echo Please download libuv source from https://github.com/libuv/libuv/releases
-    pause
+    if not defined LTA_UNATTENDED pause
     exit /b 1
 )
 
@@ -72,7 +72,7 @@ powershell -Command "& {$inFile='%TAR_GZ_FILE%'; $outFile='%TAR_FILE%'; $input=N
 
 if not exist "%TAR_FILE%" (
     echo [ERROR] Failed to decompress %TAR_GZ_FILE%
-    pause
+    if not defined LTA_UNATTENDED pause
     exit /b 1
 )
 
@@ -81,7 +81,7 @@ powershell -Command "tar -xf '%TAR_FILE%'"
 
 if not exist "%EXTRACT_DIR%" (
     echo [ERROR] Failed to extract %TAR_FILE%
-    pause
+    if not defined LTA_UNATTENDED pause
     exit /b 1
 )
 
@@ -221,7 +221,7 @@ if !CONFIG_SUCCESS! EQU 0 (
     echo      Start Menu -^> Visual Studio -^> Developer Command Prompt
     echo.
     cd ..\..
-    pause
+    if not defined LTA_UNATTENDED pause
     exit /b 1
 )
 
@@ -271,7 +271,7 @@ if !BUILD_SUCCESS! EQU 0 (
     echo [ERROR] Build failed!
     echo.
     cd ..\..
-    pause
+    if not defined LTA_UNATTENDED pause
     exit /b 1
 )
 
@@ -358,4 +358,4 @@ if exist "%EXTRACT_DIR%" rmdir /s /q "%EXTRACT_DIR%"
 echo Done!
 echo.
 
-pause
+if not defined LTA_UNATTENDED pause
