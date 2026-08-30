@@ -53,24 +53,38 @@ build/tests/unit_tests               # unit test runner
 Windows machine with nothing beside it, and `dumpbin /DEPENDENTS` lists only DLLs that ship with the
 OS. The Linux `server` binary is not self-contained — see below.
 
-### The prebuilt Linux binary is not relocatable
+### The prebuilt Linux binary and its libuv
 
-The submitted `server` binary links libuv dynamically and its `RUNPATH` points at the build tree:
+The `server` binary links libuv dynamically, so one shared library travels with it. Its `RUNPATH`
+is resolved relative to the binary itself, not to the working directory:
 
 ```
 $ readelf -d build/server/server | grep RUNPATH
- 0x...(RUNPATH)  Library runpath: [/home/<user>/.../3rdparty/libuv/lib/linux/async]
+ 0x...(RUNPATH)  Library runpath: [$ORIGIN:$ORIGIN/../../3rdparty/libuv/lib/linux/async]
 ```
 
-Copying that one file to another machine therefore fails at load time with
-`libuv.so.1: cannot open shared object file`. It was built on Ubuntu 24.04.4 LTS with GCC 13.3 for
-x86-64 glibc, so an older distribution may also disagree about `libstdc++` symbol versions.
+`$ORIGIN` is the directory the binary sits in, expanded by the loader at load time. The first entry
+covers deployment — put `server` and `libuv.so.1` in the same directory and run it from anywhere:
 
-`./build_project_linux.sh` is the supported path and always works: it builds libuv from the bundled
-tarball, configures CMake, compiles, and runs the tests in one command. The Windows client is
-statically linked and the Linux server is not, which is deliberate rather than an oversight —
-shipping `client.exe` meant shipping `uv.dll` beside it, and linking it in removed a file the user
-could lose, whereas on Linux the build script is how the server is expected to be produced.
+```bash
+$ cd / && /somewhere/else/server -h      # no LD_LIBRARY_PATH needed
+```
+
+The second entry covers the build tree, where `build/server/server` reaches back to the libuv that
+`build_project_linux.sh` built under `3rdparty/`. A plain relative path such as `lib` would not
+work for either: the loader resolves it against the *current working directory*, so it breaks as
+soon as you `cd` elsewhere, and it lets any writable directory supply a library. `$ORIGIN` is the
+only form that means "next to the executable".
+
+Two things still travel with the binary. It was built on Ubuntu 24.04.4 LTS with GCC 13.3 for
+x86-64 glibc, so a much older distribution may disagree about `libstdc++` symbol versions, and
+`libuv.so.1` must stay beside it. `./build_project_linux.sh` rebuilds both from the bundled
+tarballs on any supported machine, and the Docker image below removes the question entirely.
+
+The Windows client is statically linked and the Linux server is not, which is deliberate rather
+than an oversight — shipping `client.exe` meant shipping `uv.dll` beside it, and linking it in
+removed a file the user could lose, whereas on Linux `$ORIGIN` keeps the pair together without
+giving up the ability to swap libuv.
 
 ### If Windows refuses to run client.exe
 
