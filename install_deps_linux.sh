@@ -31,7 +31,8 @@ Usage: ./install_deps_linux.sh [--check | --yes]
                script can branch on it without duplicating the detection.
   -h, --help   Show this message
 
-Prefer not to touch the system at all? Use Docker instead: docker compose up --build
+Prefer not to touch the system at all? Use Docker instead:
+  ./docker/build_images.sh && docker compose up
 USAGE
 }
 
@@ -199,7 +200,8 @@ if [ -z "$install_cmd" ] || [ -z "$pkgs" ]; then
     echo "[WARN] Unrecognized distribution (ID='${distro_id}', ID_LIKE='${distro_like}')."
     echo "       Install these with your package manager, then re-run this script:"
     echo "         a C++17 compiler (GCC 9+ / Clang 10+), make, cmake >= $MIN_CMAKE, tar"
-    echo "       Or skip all of this and use Docker: docker compose up --build"
+    echo "       Or skip all of this and use Docker:"
+    echo "         ./docker/build_images.sh && docker compose up"
     exit 1
 fi
 

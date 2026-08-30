@@ -44,7 +44,7 @@ if [ -x ./install_deps_linux.sh ]; then
         echo "        Install them:"
         echo "          ./install_deps_linux.sh"
         echo "        Or build and run without a toolchain at all:"
-        echo "          docker compose up --build"
+        echo "          ./docker/build_images.sh && docker compose up"
         exit 1
     fi
 elif ! command -v cmake > /dev/null 2>&1; then
