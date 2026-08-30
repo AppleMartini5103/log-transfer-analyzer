@@ -26,18 +26,20 @@ round trip in 1.3 s.
 
 | | Linux (server) | Windows (client) |
 |---|---|---|
-| Compiler | GCC 9+ / Clang 10+ (C++17) | MSVC 2019+ (C++17) |
+| Compiler | GCC 9+ / Clang 10+ (C++17) | MSVC 2019 16.4+ (C++17) |
 | Build system | CMake 3.16+ | CMake 3.16+ |
-| Other | `tar`, `g++`, POSIX | none - the build script enters the MSVC environment itself |
+| Other | `tar`, POSIX | `tar` (Windows 10 1803+ has it) |
 
-No package installation is required. libuv, Catch2 and Dear ImGui ship as source tarballs under
-`3rdparty/` and are built by the scripts below.
+libuv, Catch2 and Dear ImGui ship as source tarballs under `3rdparty/` and are built by the scripts
+below, so no third-party package needs installing. Only the toolchain itself may be missing on a
+fresh machine, and the build scripts check for it before they compile anything.
 
 ### One command
 
 ```bash
+./install_deps_linux.sh           # Linux, only if the toolchain is missing
 ./build_project_linux.sh          # Linux
-build_project_window.bat          # Windows (from the VS Native Tools prompt)
+build_project_window.bat          # Windows (from any prompt)
 ```
 
 The script builds the third-party libraries from their tarballs if they are missing, configures
@@ -52,6 +54,56 @@ build/tests/unit_tests               # unit test runner
 `client.exe` is self-contained: libuv and the MSVC runtime are linked in, so it runs on a clean
 Windows machine with nothing beside it, and `dumpbin /DEPENDENTS` lists only DLLs that ship with the
 OS. The Linux `server` binary is not self-contained — see below.
+
+### If the toolchain is missing
+
+You do not have to remember to run `install_deps_linux.sh` first. `build_project_linux.sh` performs
+the same check before it compiles anything, and stops with the list and the exact install command
+rather than failing halfway through on `cmake: command not found`:
+
+```
+[INFO] Missing:
+         - cmake >= 3.16 (found 3.9.6)
+
+[INFO] Planned commands:
+         sudo apt-get update
+         sudo apt-get install -y cmake
+
+[ERROR] Build prerequisites are missing (listed above).
+        Install them:
+          ./install_deps_linux.sh
+        Or build and run without a toolchain at all:
+          ./docker/build_images.sh && docker compose up
+```
+
+The check is silent when nothing is missing, so a normal build looks exactly as it always did.
+`install_deps_linux.sh` knows apt, dnf/yum, pacman and zypper, matching on `ID` and then `ID_LIKE`
+from `/etc/os-release` so derivatives such as Mint or Rocky resolve to their parent. `--check` only
+reports and exits 1 if anything is missing; `--yes` installs without asking; an unrecognized
+distribution gets the package list and a stop rather than a guess; and without root it prints the
+commands to run as root instead of failing. Neither script ever installs anything on its own — a
+build command that quietly changes system packages is not what anyone expects, so they report and
+leave the decision to you.
+
+On Windows the equivalent checks live in `build_project_window.bat`, because there is no package
+manager to delegate to. It does more than report: if `cl.exe` is not on PATH it locates the Visual
+Studio installation carrying the C++ toolset with `vswhere` and enters the x64 developer environment
+itself, so the script runs from an ordinary prompt. Only when no such installation exists does it
+stop, naming the workload to install and the minimum version — VS 2019 16.4, where `std::from_chars`
+gained floating-point support. CMake is checked separately, because a developer prompt can have a
+compiler and still no generator: `vcvars64.bat` does not put the bundled CMake on PATH unless the
+"C++ CMake tools for Windows" component is installed. The 3rdparty scripts check `tar` and `cl`
+before they extract anything.
+
+You need none of this to *use* the client — `client.exe` ships prebuilt and self-contained. If you
+do want to build it and have neither compiler nor CMake, the whole Windows toolchain is one command,
+and the IDE-less Build Tools are enough because the script calls `vswhere` with `-products *`:
+
+```powershell
+winget install --id Microsoft.VisualStudio.2022.BuildTools --override ^
+  "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.CMake.Project"
+winget install --id Kitware.CMake       # or rely on the VS component above
+```
 
 ### The prebuilt Linux binary and its libuv
 
@@ -672,6 +724,7 @@ client/src/          Windows GUI client (Dear ImGui + Win32/DX11)
   ui/                UiState (gating), UiRenderer (drawing), file dialogs, ping console
 tests/               Catch2 unit tests, Python E2E driver, benchmark sweep
 3rdparty/            libuv, Catch2 and Dear ImGui source tarballs + build scripts
+install_deps_linux.sh  toolchain check/installer (apt, dnf/yum, pacman, zypper)
 ```
 
 `common/` depends on libuv and the standard library only — no OS headers and no `long`, so the same
