@@ -102,6 +102,29 @@ REM 이 변수로 "부모가 부른 것"임을 알린다 — 자식의 setlocal�
 REM 환경을 물려받으므로 그대로 보인다.
 set "LTA_UNATTENDED=1"
 
+REM 낡은 CMake 캐시 가드. CMakeCache.txt에는 소스·빌드 디렉토리의 절대 경로가
+REM 박히므로, 리포를 옮기거나 이름을 바꾸면 configure가 캐시를 거부한다. CMake의
+REM 메시지만으로는 원인이 "이전 빌드 트리가 남아 있다"는 것임을 알기 어렵다.
+REM
+REM ★ 구분자를 맞춰야 한다: CMake는 캐시에 C:/Source/... 처럼 슬래시로 적는데
+REM   %CD%는 C:\Source\... 처럼 역슬래시를 준다. 그대로 비교하면 항상 불일치다.
+REM   Windows 경로는 대소문자를 구분하지 않으므로 if /i 로 비교한다.
+if exist "build\CMakeCache.txt" (
+    set "CACHED_HOME="
+    for /f "usebackq tokens=1,* delims==" %%a in (`findstr /b /c:"CMAKE_HOME_DIRECTORY:INTERNAL=" "build\CMakeCache.txt"`) do set "CACHED_HOME=%%b"
+    set "CURRENT_HOME=!CD:\=/!"
+    if defined CACHED_HOME if /i not "!CACHED_HOME!"=="!CURRENT_HOME!" (
+        echo.
+        echo [ERROR] build\ was configured for a different directory:
+        echo           cached: !CACHED_HOME!
+        echo           now:    !CURRENT_HOME!
+        echo         A CMake cache cannot be reused from another path. Remove it:
+        echo           rmdir /s /q build
+        echo.
+        exit /b 1
+    )
+)
+
 echo [1/3] Checking 3rdparty libraries...
 for %%L in (libuv catch2 imgui) do (
     if not exist "3rdparty\%%L\include" (

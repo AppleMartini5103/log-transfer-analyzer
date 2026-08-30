@@ -54,6 +54,26 @@ elif ! command -v cmake > /dev/null 2>&1; then
     exit 1
 fi
 
+# 낡은 CMake 캐시 가드. CMakeCache.txt에는 소스·빌드 디렉토리의 절대 경로가 박히므로,
+# 리포를 옮기거나 다른 경로로 마운트하면 configure가 캐시를 거부한다. CMake가 내는
+# 메시지는 두 줄짜리라 원인이 "이전 빌드 트리가 남아 있다"는 것임을 알아채기 어렵다.
+#
+# head로 파이프하지 않는다 — grep -q·head가 선행 명령을 SIGPIPE로 죽이는 함정을
+# 이슈 66에서 겪었다. 통째로 받아 셸 확장으로 첫 줄만 자른다.
+CMAKE_CACHE="build/CMakeCache.txt"
+if [ -f "$CMAKE_CACHE" ]; then
+    cached_home="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$CMAKE_CACHE")"
+    cached_home="${cached_home%%$'\n'*}"
+    if [ -n "$cached_home" ] && [ "$cached_home" != "$SCRIPT_DIR" ]; then
+        echo "[ERROR] build/ was configured for a different directory:"
+        echo "          cached: $cached_home"
+        echo "          now:    $SCRIPT_DIR"
+        echo "        A CMake cache cannot be reused from another path. Remove it:"
+        echo "          rm -rf build"
+        exit 1
+    fi
+fi
+
 echo "========================================"
 echo "log-transfer-analyzer Build (Linux)"
 echo "========================================"
