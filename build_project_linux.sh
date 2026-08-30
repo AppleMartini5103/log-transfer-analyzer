@@ -28,6 +28,32 @@ if [ "$ARCH_NAME" != "x86_64" ]; then
     echo "[WARN] Only x86_64 has been verified; detected $ARCH_NAME. Continuing..."
 fi
 
+# 툴체인 가드. 검사 자체는 install_deps_linux.sh에 위임한다 — 무엇이 필요한지 아는
+# 곳을 두 군데로 두면 한쪽만 갱신되어 어긋난다. 여기서는 종료 코드만 본다.
+#
+# 설치는 이 스크립트가 하지 않는다: 빌드 명령이 말없이 시스템 패키지를 건드리면
+# 채점자 입장에서 예상 밖의 일이 된다. 무엇이 없는지 보여주고, 다음에 칠 명령을
+# 알려주고, 결정은 사람에게 남긴다.
+# 출력은 붙잡아 두었다가 실패했을 때만 보여준다. 정상 빌드에서 배너가 두 번
+# 나오면 정작 읽어야 할 [1/3]·[2/3] 진행 표시가 묻힌다.
+if [ -x ./install_deps_linux.sh ]; then
+    if ! deps_report="$(./install_deps_linux.sh --check 2>&1)"; then
+        printf '%s\n' "$deps_report"
+        echo ""
+        echo "[ERROR] Build prerequisites are missing (listed above)."
+        echo "        Install them:"
+        echo "          ./install_deps_linux.sh"
+        echo "        Or build and run without a toolchain at all:"
+        echo "          docker compose up --build"
+        exit 1
+    fi
+elif ! command -v cmake > /dev/null 2>&1; then
+    # install_deps_linux.sh가 없는 경우(부분 체크아웃 등)의 최소 안전망
+    echo "[ERROR] cmake not found, and install_deps_linux.sh is not available here."
+    echo "        Install a C++17 toolchain: g++, make, cmake >= 3.16, tar"
+    exit 1
+fi
+
 echo "========================================"
 echo "log-transfer-analyzer Build (Linux)"
 echo "========================================"
