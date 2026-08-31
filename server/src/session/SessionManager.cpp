@@ -95,7 +95,10 @@ void SessionManager::onConnection() {
             "Connection queued in backlog (session in progress, 1:1 policy)");
         return;
     }
-    acceptIfIdle();
+    // 게이트를 거쳐 간다. 세션이 없더라도 직전 세션의 폐기가 아직 안 끝났을 수 있고,
+    // 그 상태에서 받으면 통계가 이어진다. 미룬 연결은 백로그에 남아 있다가
+    // 폐기 완료 신호가 오면 acceptPending()이 집어간다 — 유실되지 않는다.
+    acceptWhenParserIdle();
 }
 
 void SessionManager::acceptWhenParserIdle() {
