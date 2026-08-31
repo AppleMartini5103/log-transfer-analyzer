@@ -47,6 +47,8 @@ public:
     // 두 핸들러 모두 루프 스레드에서 호출된다 (uv_async 콜백 문맥)
     using CompletionHandler = std::function<void(AnalysisResult)>;
     using ResumeHandler = std::function<void()>;
+    // 중단된 세션의 폐기가 끝났음을 루프에 알린다 (경쟁 조건 해소)
+    using AbortDoneHandler = std::function<void()>;
 
     ParserThread(uv_loop_t* loop, std::size_t slotCount, std::size_t slotSize);
     ~ParserThread();
@@ -62,7 +64,8 @@ public:
     //   열려 있으면 활성 핸들로 남아 uv_run이 영원히 반환하지 않는다. 여러 번 불러도 안전
     void stop();
 
-    void setHandlers(CompletionHandler onComplete, ResumeHandler onResume);
+    void setHandlers(CompletionHandler onComplete, ResumeHandler onResume,
+                     AbortDoneHandler onAbortDone = nullptr);
 
     // ── producer 측 (루프 스레드 전용) ──
     void beginSession(const std::string& skipReportPath, const std::string& csvPath);
@@ -71,6 +74,13 @@ public:
     bool ringFull() const;
     void markUploadComplete();  // 트레일러 검증 후 — 파서의 종료 판정 재료
     void abortSession();        // 강제 단절·타임아웃 — 링 폐기 + 상태 리셋 요청
+
+    // 중단 요청이 아직 처리되지 않았는가 (루프 스레드에서 읽는다).
+    //
+    // 루프는 이것이 false가 된 뒤에야 다음 세션을 시작해야 한다. abortSession()은 플래그만
+    // 세우고 실제 폐기는 파서 스레드가 하므로, 그 사이에 새 세션이 시작되면 이전 세션의
+    // 통계가 그대로 이어진다. 그 창을 SessionManager가 accept 재개를 미뤄서 닫는다.
+    bool abortPending() const { return _abortRequested.load(std::memory_order_acquire); }
 
     // 루프가 수신을 멈췄음을 알린다 — 파서가 슬롯을 반환할 때 깨울지 판단하는 기준
     void setReadStopped(bool stopped) { _readStopped.store(stopped, std::memory_order_release); }
@@ -83,10 +93,12 @@ private:
     void resetSessionState();
     static void onCompletionAsync(uv_async_t* handle);
     static void onResumeAsync(uv_async_t* handle);
+    static void onAbortDoneAsync(uv_async_t* handle);
 
     uv_loop_t* _loop = nullptr;
     std::unique_ptr<uv_async_t> _completionAsync;
     std::unique_ptr<uv_async_t> _resumeAsync;
+    std::unique_ptr<uv_async_t> _abortDoneAsync;
 
     common::SpscRingBuffer _ring;
     LineReassembler _reassembler;
@@ -107,6 +119,7 @@ private:
     AnalysisResult _result;
     CompletionHandler _onComplete;
     ResumeHandler _onResume;
+    AbortDoneHandler _onAbortDone;
 
     std::string _skipReportPath;
     std::string _csvPath;

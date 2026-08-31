@@ -12,6 +12,7 @@ ParserThread::ParserThread(uv_loop_t* loop, std::size_t slotCount, std::size_t s
     : _loop(loop),
       _completionAsync(std::make_unique<uv_async_t>()),
       _resumeAsync(std::make_unique<uv_async_t>()),
+      _abortDoneAsync(std::make_unique<uv_async_t>()),
       _ring(slotCount, slotSize) {}
 
 ParserThread::~ParserThread() {
@@ -34,6 +35,7 @@ void ParserThread::closeHandles() {
     };
     closeAsync(_completionAsync);
     closeAsync(_resumeAsync);
+    closeAsync(_abortDoneAsync);
 }
 
 bool ParserThread::start(std::string& error) {
@@ -52,6 +54,12 @@ bool ParserThread::start(std::string& error) {
         return false;
     }
     _resumeAsync->data = this;
+    rc = uv_async_init(_loop, _abortDoneAsync.get(), onAbortDoneAsync);
+    if (rc != 0) {
+        error = std::string{"uv_async_init(abortDone): "} + uv_strerror(rc);
+        return false;
+    }
+    _abortDoneAsync->data = this;
 
     // 스레드 생성은 데몬화(fork) 이후여야 한다 — main의 초기화 순서가 이를 보장한다
     _thread = std::thread([this] { run(); });
@@ -78,18 +86,27 @@ void ParserThread::stop() {
     closeHandles();
 }
 
-void ParserThread::setHandlers(CompletionHandler onComplete, ResumeHandler onResume) {
+void ParserThread::setHandlers(CompletionHandler onComplete, ResumeHandler onResume,
+                               AbortDoneHandler onAbortDone) {
     const std::lock_guard<std::mutex> lock(_resultMutex);
     _onComplete = std::move(onComplete);
     _onResume = std::move(onResume);
+    _onAbortDone = std::move(onAbortDone);
 }
 
 void ParserThread::beginSession(const std::string& skipReportPath, const std::string& csvPath) {
-    // 파서는 대기 상태여야 한다 (이전 세션이 정리된 뒤 호출된다)
+    // 파서는 대기 상태여야 한다 — SessionManager가 abortPending()이 false가 된 뒤에만
+    // 새 세션을 시작하므로 이 시점에 미처리 중단은 없다.
+    //
+    // ★ _abortRequested를 여기서 초기화하지 않는다. 종전에는 초기화했는데, 그것이
+    //   경쟁 조건이었다: abortSession()은 플래그만 세우고 폐기는 파서 스레드가 하는데,
+    //   파서가 스케줄되기 전에 루프가 여기까지 오면 요청이 취소되어 폐기가 영영
+    //   실행되지 않았다. 그러면 이전 세션의 통계가 다음 결과에 그대로 남는다.
+    //   플래그의 수명은 파서가 단독으로 소유한다 — 세우는 것은 루프, 지우는 것은 파서다.
     _skipReportPath = skipReportPath;
     _csvPath = csvPath;
     _uploadComplete.store(false, std::memory_order_release);
-    _abortRequested.store(false, std::memory_order_release);
+
     _readStopped.store(false, std::memory_order_release);
 }
 
@@ -152,6 +169,11 @@ void ParserThread::run() {
             // (소유권 규칙 유지 — 총괄표의 "세션 중단 시" 칸)
             resetSessionState();
             _abortRequested.store(false, std::memory_order_release);
+            // 폐기가 끝났음을 루프에 알린다 — SessionManager는 이 신호를 받고서야
+            // 다음 연결을 accept한다 (그 전에 시작하면 통계가 이어진다)
+            if (_abortDoneAsync) {
+                uv_async_send(_abortDoneAsync.get());
+            }
             continue;
         }
 
@@ -277,6 +299,22 @@ void ParserThread::onResumeAsync(uv_async_t* handle) {
         handler = self->_onResume;
     }
     // uv_async_send N회가 콜백 1회로 합쳐질 수 있다(coalescing) — 재개는 멱등이라 문제없다
+    if (handler) {
+        handler();
+    }
+}
+
+void ParserThread::onAbortDoneAsync(uv_async_t* handle) {
+    auto* self = static_cast<ParserThread*>(handle->data);
+    if (self == nullptr) {
+        return;
+    }
+    AbortDoneHandler handler;
+    {
+        const std::lock_guard<std::mutex> lock(self->_resultMutex);
+        handler = self->_onAbortDone;
+    }
+    // 합쳐져도 무해하다 — 핸들러는 "지금 accept해도 되는가"를 다시 판정할 뿐이다
     if (handler) {
         handler();
     }

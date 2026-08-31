@@ -33,6 +33,10 @@ SessionManager::SessionManager(uv_loop_t* loop, std::size_t chunkSize, std::size
             if (_session) {
                 _session->resumeReading();
             }
+        },
+        [this] {
+            // 폐기 완료 — 이제 다음 연결을 받아도 통계가 이어지지 않는다
+            acceptWhenParserIdle();
         });
 }
 
@@ -89,6 +93,21 @@ void SessionManager::onConnection() {
         _pendingConnection = true;
         common::Logger::instance().info(
             "Connection queued in backlog (session in progress, 1:1 policy)");
+        return;
+    }
+    acceptIfIdle();
+}
+
+void SessionManager::acceptWhenParserIdle() {
+    // 이전 세션이 중단됐다면 파서가 통계·링을 폐기할 때까지 accept를 미룬다.
+    //
+    // 미루지 않으면: abortSession()은 플래그만 세우고 실제 폐기는 파서 스레드가 하는데,
+    // 그 사이에 새 세션이 시작되면 이전 세션의 통계가 그대로 이어져 다음 클라이언트의
+    // result.csv에 섞인다. 로그에도 남지 않아 조용히 틀린 결과가 나간다.
+    //
+    // 대기는 루프를 막지 않는다 — 여기서 그냥 돌아가고, 파서가 폐기를 마치면
+    // onAbortDone 신호가 이 함수를 다시 부른다. 중단이 없었으면 판정은 원자 읽기 하나다.
+    if (_parser.abortPending()) {
         return;
     }
     acceptIfIdle();
@@ -151,7 +170,7 @@ void SessionManager::onReapCb(uv_idle_t* handle) {
     common::Logger::instance().info("Session reaped, ready to accept (completed " +
                                     std::to_string(self->_completedSessions) + ")");
     // CLEANUP 후 accept 재개 — 백로그에 대기 중인 연결이 있으면 지금 받는다
-    self->acceptIfIdle();
+    self->acceptWhenParserIdle();
 }
 
 }  // namespace server::session

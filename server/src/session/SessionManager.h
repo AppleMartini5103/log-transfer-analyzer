@@ -51,6 +51,8 @@ private:
     void onSessionFinished() override;
 
     void acceptIfIdle();
+    // 파서가 이전 세션의 폐기를 끝낸 뒤에만 accept한다 (경쟁 조건 해소)
+    void acceptWhenParserIdle();
     static void onReapCb(uv_idle_t* handle);
 
     uv_loop_t* _loop = nullptr;
