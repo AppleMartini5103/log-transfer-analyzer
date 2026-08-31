@@ -14,12 +14,14 @@
 두 번째 조건이 핵심이다. "A의 모듈이 없다"만 보면 A의 줄 수가 B에 합산됐을 가능성을 놓친다.
 
 사용법:
-  python3 check_corrupt_isolation.py --port 23507
+  python3 check_corrupt_isolation.py
+  python3 check_corrupt_isolation.py --settle 3    # 파서가 느릴 때 여유를 더 준다
   (서버를 먼저 띄워둘 것: ./build/server/server -p 23507)
 """
 import argparse
 import struct
 import sys
+import time
 import zlib
 
 import byda_protocol as proto
@@ -41,12 +43,20 @@ def corrupt_trailer(payload):
     return proto.preamble(proto.TYPE_UPLOAD_TRAILER) + struct.pack(">I", bad)
 
 
-def session_a(port, host):
+def session_a(port, host, settle):
     payload = make_log(MODULE_A, LINES_A)
     conn = proto.Connection(port, host=host)
     try:
         conn.send(proto.upload_header(len(payload), "corrupt.log"))
         conn.send_payload(payload)
+        # 트레일러를 바로 보내지 않고 기다린다.
+        #
+        # 왜 필요한가: 이 지연이 없으면 페이로드-트레일러-CRC실패-abort가 파서 스레드가
+        # 링 슬롯을 소비하기도 전에 끝난다. resetSessionState()는 남은 슬롯을 파싱하지 않고
+        # 버리므로, 통계가 애초에 쌓이지 않아 "폐기됐다"를 검증하지 못한다.
+        # 실제 500MB 전송은 수십 초가 걸려 파서가 대부분을 이미 처리한 뒤 CRC가 실패한다 —
+        # 리뷰가 지적한 상황이 그것이므로, 그 조건을 지연으로 재현한다.
+        time.sleep(settle)
         conn.send(corrupt_trailer(payload))
         status, received = conn.read_ack()
         return proto.ACK_NAMES[status], received
@@ -75,10 +85,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=23507)
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--settle", type=float, default=1.0,
+                        help="seconds to wait after the payload so the parser consumes it")
     options = parser.parse_args()
 
     print(f"[A] uploading {LINES_A} {MODULE_A} lines with a deliberately wrong CRC...")
-    name, received = session_a(options.port, options.host)
+    name, received = session_a(options.port, options.host, options.settle)
     print(f"    server answered Ack({name}), received {received} bytes")
     if name != "CRC_MISMATCH":
         print(f"    UNEXPECTED: wanted CRC_MISMATCH")
