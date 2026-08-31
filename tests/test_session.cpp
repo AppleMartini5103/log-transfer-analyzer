@@ -7,6 +7,8 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <charconv>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -458,4 +460,145 @@ TEST_CASE("session: WAIT_DONE timeout releases a client that never acknowledges"
     REQUIRE(runUntil(&fixture.loop, [&] { return next.connectDone; }));
     REQUIRE(next.socket.startRead() == 0);
     REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->hasActiveSession(); }));
+}
+
+// ── 손상 세션의 통계가 다음 결과로 새지 않는가 (리뷰 지적 1번) ────────────────
+//
+// 서버는 수신하며 동시에 파싱하므로, 트레일러의 CRC가 틀렸다는 사실은 통계가 이미 쌓인
+// 뒤에야 드러난다. 그 통계가 확실히 폐기되는지를 검증한다.
+//
+// [왜 페이로드를 크게 잡는가 — 작으면 검증이 공허해진다]
+//   손으로 확인하는 스크립트(tests/e2e/check_corrupt_isolation.py)를 처음 5,600바이트로
+//   만들었을 때, _stats.reset()을 제거해도 테스트가 통과했다. 루프백에서는 트레일러·CRC
+//   실패·abort가 파서 스레드가 링 슬롯을 소비하기도 전에 끝나고, resetSessionState()는
+//   남은 슬롯을 파싱하지 않고 버리기 때문이다. 즉 통계가 애초에 쌓이지 않아 "폐기됐다"를
+//   증명할 대상이 없었다.
+//   여기서는 페이로드를 링 용량(kTestRingSlots x kTestChunkSize = 128KB)보다 훨씬 크게
+//   잡는다. 그러면 백프레셔가 걸려, 전송이 끝났다는 사실 자체가 파서가 링을 반복해서
+//   비웠다는 뜻이 된다 — 시간에 기대지 않고 파싱을 보장하는 방법이다.
+//
+// [왜 두 번째 어서션이 필요한가]
+//   "A의 모듈이 결과에 없다"만 보면 A의 줄들이 B의 카운트에 합산된 경우를 놓친다.
+//   실제로 reset을 제거하고 돌렸을 때 B가 7이 아니라 14로 나왔다 — 직전 실행분까지
+//   누적된 것이다. 그래서 B의 카운트가 보낸 줄 수와 정확히 같은지도 함께 본다.
+
+namespace {
+
+constexpr const char* kModuleA = "RadarTrackNodeState";
+constexpr const char* kModuleB = "SectorSchedulerRTS";
+
+std::string logLines(const std::string& module, const std::string& body, std::size_t count) {
+    std::string out;
+    out.reserve(count * 140);
+    for (std::size_t i = 0; i < count; ++i) {
+        out += "[2026-06-19_22:00:";
+        out += (i % 60 < 10 ? "0" : "");
+        out += std::to_string(i % 60);
+        out += ".000000][7710][30482][1885246073] BYDA::";
+        out += module;
+        out += ": ";
+        out += body;
+        out += '\n';
+    }
+    return out;
+}
+
+std::string moduleALines(std::size_t count) {
+    return logLines(kModuleA, "node_state_synced: nodeUID[47], rfLane[3], lockState[1->0]", count);
+}
+
+std::string moduleBLines(std::size_t count) {
+    return logLines(kModuleB, "scan started: RT_SWEEP jobID[7710000000415], pattern[SW3], gatedFlag[1]",
+                    count);
+}
+
+// CSV의 버킷 블록에서 한 모듈의 합계를 센다. 없으면 0.
+std::uint64_t bucketTotal(const std::string& csv, const std::string& module) {
+    std::uint64_t total = 0;
+    std::size_t pos = 0;
+    while ((pos = csv.find(module + ",", pos)) != std::string::npos) {
+        const std::size_t lineEnd = csv.find('\n', pos);
+        const std::string line = csv.substr(pos, lineEnd - pos);
+        const std::size_t lastComma = line.rfind(',');
+        if (lastComma != std::string::npos) {
+            std::uint64_t count = 0;
+            const char* begin = line.c_str() + lastComma + 1;
+            std::from_chars(begin, line.c_str() + line.size(), count);
+            total += count;
+        }
+        pos = (lineEnd == std::string::npos) ? csv.size() : lineEnd;
+    }
+    return total;
+}
+
+}  // namespace
+
+TEST_CASE("session: statistics from a CRC-failed upload never reach the next result") {
+    Fixture fixture;
+
+    // ── 세션 A: 링 용량을 넘는 페이로드를 보내고 트레일러 CRC만 어긋나게 한다 ──
+    const std::string payloadA = moduleALines(8000);  // 약 1MB — 링 128KB의 8배
+    REQUIRE(payloadA.size() > kTestChunkSize * kTestRingSlots * 4);
+
+    {
+        TestClient a{&fixture.loop};
+        REQUIRE(a.socket.connect("127.0.0.1", fixture.port) == 0);
+        REQUIRE(runUntil(&fixture.loop, [&] { return a.connectDone; }));
+        REQUIRE(a.socket.startRead() == 0);
+        REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->hasActiveSession(); }));
+
+        REQUIRE(a.socket.send(asString(headerBytes(payloadA.size(), "corrupt.log"))) == 0);
+        REQUIRE(a.socket.send(payloadA) == 0);
+
+        // 페이로드가 전부 서버에 도달할 때까지 돌린다. 링보다 큰 페이로드라 이 시점이면
+        // 파서가 링을 여러 번 비운 뒤다 = 통계가 쌓여 있다.
+        REQUIRE(runUntil(&fixture.loop, [&] { return false; }, 800) == false);
+
+        // 올바른 CRC에 1을 더해 어긋나게 한다 — 페이로드 자체는 손대지 않는다
+        const std::uint32_t badCrc = common::crc32(0, payloadA) + 1;
+        REQUIRE(a.socket.send(asString(trailerBytes(badCrc))) == 0);
+
+        REQUIRE(runUntil(&fixture.loop, [&] { return a.received.size() >= proto::kAckSize; }));
+        proto::Ack ack;
+        REQUIRE(proto::decode(a.received, ack) == proto::DecodeStatus::Ok);
+        REQUIRE(ack.status == proto::AckStatus::CrcMismatch);
+
+        REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->completedSessions() == 1; }));
+    }
+
+    // ── 세션 B: 다른 모듈로 정상 완주 ──
+    const std::size_t kLinesB = 7;
+    const std::string payloadB = moduleBLines(kLinesB);
+
+    TestClient b{&fixture.loop};
+    REQUIRE(b.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return b.connectDone; }));
+    REQUIRE(b.socket.startRead() == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return fixture.manager->hasActiveSession(); }));
+
+    REQUIRE(b.socket.send(asString(headerBytes(payloadB.size(), "clean.log"))) == 0);
+    REQUIRE(b.socket.send(payloadB) == 0);
+    REQUIRE(b.socket.send(asString(trailerBytes(common::crc32(0, payloadB)))) == 0);
+
+    REQUIRE(runUntil(&fixture.loop, [&] {
+        return b.received.size() >= proto::kAckSize + proto::kResultHeaderSize;
+    }));
+    proto::Ack ackB;
+    REQUIRE(proto::decode(b.received, ackB) == proto::DecodeStatus::Ok);
+    REQUIRE(ackB.status == proto::AckStatus::Ok);
+
+    proto::ResultHeader result;
+    const std::string_view afterAck = std::string_view{b.received}.substr(proto::kAckSize);
+    REQUIRE(proto::decode(afterAck, result) == proto::DecodeStatus::Ok);
+    REQUIRE(runUntil(&fixture.loop, [&] {
+        return b.received.size() >= proto::kAckSize + proto::kResultHeaderSize + result.csvSize;
+    }));
+    const std::string csv =
+        b.received.substr(proto::kAckSize + proto::kResultHeaderSize, result.csvSize);
+
+    INFO("result.csv of session B:\n" << csv);
+    // ① 손상 세션의 모듈이 하나도 넘어오지 않았다
+    REQUIRE(bucketTotal(csv, kModuleA) == 0);
+    // ② 정상 세션의 카운트가 보낸 줄 수와 정확히 같다 (합산되지 않았다)
+    REQUIRE(bucketTotal(csv, kModuleB) == kLinesB);
 }
