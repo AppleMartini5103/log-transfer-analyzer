@@ -193,6 +193,38 @@ raised ASLR entropy past what TSan's fixed shadow layout assumes. Run it under
 `setarch $(uname -m) -R` to disable ASLR for that process; lowering `vm.mmap_rnd_bits` system-wide
 would also work but weakens ASLR for the whole machine.
 
+### Framework comparison: Catch2 vs GoogleTest (optional)
+
+The suite is Catch2, and stays Catch2 — one framework, one set of fixtures. This optional target
+exists to make that a measured choice rather than a default: the five crc32 test cases are
+mirrored in GoogleTest (`tests/test_crc32_gtest.cpp`), built the same way as every other
+third-party dependency (bundled tarball, Linux only):
+
+```bash
+(cd 3rdparty/gtest && ./build_linux.sh)
+cmake -B build-gtestcmp -DCMAKE_BUILD_TYPE=Release -DENABLE_GTEST_COMPARISON=ON
+cmake --build build-gtestcmp -j
+./build-gtestcmp/tests/unit_tests "crc32*"     # Catch2:  5 cases, 17 assertions
+./build-gtestcmp/tests/crc32_tests_gtest       # gtest:   5 tests
+```
+
+Measured on the build machine (GCC 13.3, `-O2`, medians of 3):
+
+| | Catch2 3.15.3 | GoogleTest 1.15.2 |
+|---|---|---|
+| One-time framework build | 14.5 s (amalgamated TU) | 7.3 s (gtest-all + gtest_main) |
+| Compiling the crc32 test TU | 0.71 s | 0.91 s |
+| Running the five cases | instant | instant |
+
+Both runs pass and assert the same values, as they must — the framework is the runner, not the
+verification. The differences that actually matter in use: Catch2 decomposes `REQUIRE(a == b)`
+and prints both sides on failure, runs cases in random order by default, and offers `SECTION`
+for in-case branching; GoogleTest wants `EXPECT_EQ(expected, actual)` macros, fixed order unless
+`--gtest_shuffle`, class fixtures (`TEST_F`) — and brings gmock and death tests, which Catch2
+has no equivalent for. Nothing in this project needs mocks or death tests, which is why Catch2's
+lighter ergonomics won. The comparison target is excluded from the default build and from
+`build_project_linux.sh`; enabling it changes nothing about the 167-test suite.
+
 ### Running with Docker
 
 `./build_project_linux.sh` on the host remains the supported path; the images exist so the server
