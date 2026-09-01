@@ -17,6 +17,7 @@ add_executable(client WIN32
     src/app/main.cpp
     src/app/Application.cpp
     src/service/FileReader.cpp
+    src/service/ResultSummary.cpp
     src/service/TransferService.cpp
     src/ui/FileDialog.cpp
     src/ui/PingConsole.cpp

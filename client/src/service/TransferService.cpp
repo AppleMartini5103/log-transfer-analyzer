@@ -2,6 +2,7 @@
 
 #include "net/TcpSocket.h"
 #include "protocol/Codec.h"
+#include "service/ResultSummary.h"
 #include "util/Crc32.h"
 
 #include <array>
@@ -609,6 +610,10 @@ void TransferService::finishDownload() {
         return;
     }
 
+    // 경고 문구는 _resultCsv가 아니라 _csv에서 만든다 — _resultCsv는 _resultMutex가
+    // 지키는 값이라 UI 스레드의 takeResultCsv()와 겹칠 수 있다. _csv는 워커 단독 소유다.
+    const std::string skipWarning = formatSkipWarning(summarizeResultCsv(_csv));
+
     {
         const std::lock_guard<std::mutex> lock(_resultMutex);
         _resultCsv = _csv;
@@ -627,6 +632,17 @@ void TransferService::finishDownload() {
 
     _sessionCompleted = true;  // 이후의 EOF는 정상 종료로 해석한다
     pushLog(common::LogLevel::Info, "result.csv verified - session complete");
+
+    // 스킵된 라인이 있으면 알린다 (리뷰 3). 저장 대화상자가 아니라 여기인 이유:
+    // 이것은 저장이 아니라 데이터 품질에 대한 사실이므로, 사용자가 파일을 저장하지
+    // 않기로 해도 보여야 한다. 로그 창 한 줄로 끝내는 것은 500MB 전송 끝에 모달이
+    // 뜨면 방해가 되기 때문이다.
+    //
+    // 파싱이 실패하면 빈 문자열이 돌아올 뿐 세션은 그대로 완료된다 — 서버 CSV가
+    // 조금 달라졌다고 클라이언트가 실패하면 리뷰 3의 결함을 이쪽에 옮기는 것이다.
+    if (!skipWarning.empty()) {
+        pushLog(common::LogLevel::Warn, skipWarning);
+    }
     pushSession(SessionState::Done);
 }
 

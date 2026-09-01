@@ -14,6 +14,7 @@ set(COMMON_TESTS
     test_net.cpp
     test_client_scenarios.cpp
     test_ping_console.cpp
+    test_result_summary.cpp
     test_ui_state.cpp
 )
 
@@ -29,6 +30,7 @@ set(COMMON_TESTS
 set(CLIENT_SOURCES
     ${CMAKE_SOURCE_DIR}/client/src/service/TransferService.cpp
     ${CMAKE_SOURCE_DIR}/client/src/service/FileReader.cpp
+    ${CMAKE_SOURCE_DIR}/client/src/service/ResultSummary.cpp
     ${CMAKE_SOURCE_DIR}/client/src/ui/UiState.cpp
 )
 
