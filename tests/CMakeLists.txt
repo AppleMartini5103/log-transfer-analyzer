@@ -66,5 +66,26 @@ target_include_directories(unit_tests PRIVATE
 
 add_test(NAME unit_tests COMMAND unit_tests)
 
+# ── 프레임워크 비교 타깃 (기본 OFF — 루트 CMakeLists의 옵션 주석 참조) ──────
+# 켜졌을 때 3rdparty가 준비되지 않았으면 링크 단계가 아니라 configure에서 바로 알린다
+# (새니타이저 옵션의 "적용 안 된 빌드가 조용히 성공" 교훈과 같은 원칙).
+if(ENABLE_GTEST_COMPARISON AND NOT WIN32)
+    set(GTEST_DIR ${THIRDPARTY_DIR}/gtest)
+    if(NOT EXISTS ${GTEST_DIR}/lib/linux/libgtest.a)
+        message(FATAL_ERROR
+            "ENABLE_GTEST_COMPARISON is ON but 3rdparty/gtest is not built. "
+            "Run 3rdparty/gtest/build_linux.sh first.")
+    endif()
+    find_package(Threads REQUIRED)
+    add_executable(crc32_tests_gtest test_crc32_gtest.cpp)
+    target_include_directories(crc32_tests_gtest PRIVATE ${GTEST_DIR}/include)
+    target_link_libraries(crc32_tests_gtest PRIVATE common
+        ${GTEST_DIR}/lib/linux/libgtest_main.a
+        ${GTEST_DIR}/lib/linux/libgtest.a
+        Threads::Threads)
+    add_test(NAME crc32_tests_gtest COMMAND crc32_tests_gtest)
+    message(STATUS "Framework comparison: crc32_tests_gtest ENABLED")
+endif()
+
 # uv.dll 복사 단계는 없다 — Windows도 libuv를 정적으로 링크한다 (design 19번).
 # 종전에는 여기서 uv.dll을 실행 파일 옆으로 복사했다. 빠뜨리면 0xC0000135로 즉시 죽었다.

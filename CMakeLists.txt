@@ -65,6 +65,13 @@ option(ENABLE_SANITIZERS "Build with AddressSanitizer + UndefinedBehaviorSanitiz
 #     나중에 진짜 소견까지 함께 지워질 수 있다. 실제로 잡음이 나오면 그때 근거와 함께 추가한다
 option(ENABLE_TSAN "Build with ThreadSanitizer (excludes ENABLE_SANITIZERS)" OFF)
 
+# ── 프레임워크 비교 (Linux 전용, 기본 OFF) ────────────────────────────────────
+# 같은 crc32 테스트 5개를 GoogleTest로도 빌드한다 (tests/test_crc32_gtest.cpp).
+# 스위트는 Catch2 하나로 유지한다 — 이 옵션은 README "Framework comparison" 절의
+# 측정을 재현하기 위한 것이며, 기본 빌드·ctest에는 아무 영향이 없다.
+# 선행 조건: 3rdparty/gtest/build_linux.sh (tests/CMakeLists.txt가 부재를 즉시 알린다)
+option(ENABLE_GTEST_COMPARISON "Build the crc32 tests with GoogleTest too, for the README framework comparison (Linux only)" OFF)
+
 if(ENABLE_SANITIZERS AND ENABLE_TSAN)
     message(FATAL_ERROR
         "ENABLE_SANITIZERS (ASan) and ENABLE_TSAN cannot be combined - they intercept memory "
