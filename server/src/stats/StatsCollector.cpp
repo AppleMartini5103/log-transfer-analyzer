@@ -60,6 +60,8 @@ bool StatsCollector::record(const ParsedLine& line) {
         } else {
             ++_excludedSpdSamples;
         }
+    } else if (line.module == ModuleId::BeamSteerCtrlUnitImpl) {
+        ++_missingSpdSamples;  // spd 부재 라인 — 카운트되되 표본 없음 (StatsCollector.h 항등식)
     }
     return true;
 }
@@ -77,6 +79,7 @@ void StatsCollector::reset() {
     }
     _validSpdSamples = 0;
     _excludedSpdSamples = 0;
+    _missingSpdSamples = 0;
     _spdSum = 0.0;
 }
 

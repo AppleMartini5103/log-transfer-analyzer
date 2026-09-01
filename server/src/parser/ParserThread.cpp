@@ -226,7 +226,7 @@ void ParserThread::finishSession() {
     });
 
     AnalysisResult result;
-    result.csv = server::csv::buildResultCsv(_stats, _reporter);
+    result.csv = server::csv::buildResultCsv(_stats, _reporter, _totalLines);
     result.crc32 = common::crc32(0, result.csv);  // 수 KB 일괄 계산
     result.totalLines = _totalLines;
     result.skippedLines = _reporter.total();

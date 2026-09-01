@@ -120,6 +120,27 @@ TEST_CASE("stats: excluded samples still count toward module totals") {
     REQUIRE(stats.validSpdSamples() == 0);
 }
 
+TEST_CASE("stats: missing spd counts only for BeamSteer lines without the field") {
+    // 항등식 재료 (리뷰 3 계약 결정 4): BeamSteer 계수 = valid + excluded + missing
+    StatsCollector stats;
+    REQUIRE(stats.record(makeSpdLine(137500.0, true)));                          // valid
+    REQUIRE(stats.record(makeSpdLine(0.0, false)));                              // excluded
+    REQUIRE(stats.record(makeLine(ModuleId::BeamSteerCtrlUnitImpl, 19, 22)));    // missing
+    // 다른 모듈은 hasSpd=false여도 missing이 아니다 — spd는 BeamSteer의 필드
+    REQUIRE(stats.record(makeLine(ModuleId::RadarTrackNodeState, 19, 22)));
+
+    REQUIRE(stats.validSpdSamples() == 1);
+    REQUIRE(stats.excludedSpdSamples() == 1);
+    REQUIRE(stats.missingSpdSamples() == 1);
+    // 좌변 = 3 (valid+excluded+missing 라인이 전부 같은 버킷에 계수됨)
+    const auto buckets = dump(stats);
+    for (const auto& bucket : buckets) {
+        if (bucket.module == ModuleId::BeamSteerCtrlUnitImpl) {
+            REQUIRE(bucket.count == 3);
+        }
+    }
+}
+
 TEST_CASE("stats: empty session yields zero average without dividing by zero") {
     StatsCollector stats;
     REQUIRE(stats.averageSpeed() == Catch::Approx(0.0));  // 빈 파일도 정상 세션
@@ -176,12 +197,14 @@ TEST_CASE("stats: entry limit rejects new keys but keeps counting known ones") {
 TEST_CASE("stats: reset clears everything for the next session") {
     StatsCollector stats;
     REQUIRE(stats.record(makeSpdLine(137500.0, true)));
+    REQUIRE(stats.record(makeLine(ModuleId::BeamSteerCtrlUnitImpl, 19, 22)));  // missing 표본
     REQUIRE(stats.record(makeLine(ModuleId::RadarTrackNodeState, 19, 22)));
     stats.reset();
 
     REQUIRE(stats.totalEntries() == 0);
     REQUIRE(stats.validSpdSamples() == 0);
     REQUIRE(stats.excludedSpdSamples() == 0);
+    REQUIRE(stats.missingSpdSamples() == 0);
     REQUIRE(stats.averageSpeed() == Catch::Approx(0.0));
     REQUIRE(dump(stats).empty());
 }

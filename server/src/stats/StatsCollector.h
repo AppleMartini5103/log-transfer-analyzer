@@ -62,6 +62,7 @@ public:
     // ── 작업2 재료 ──
     std::uint64_t validSpdSamples() const { return _validSpdSamples; }
     std::uint64_t excludedSpdSamples() const { return _excludedSpdSamples; }
+    std::uint64_t missingSpdSamples() const { return _missingSpdSamples; }
     // 유효 표본 없으면 0.0 (빈 파일도 정상 세션 — 0으로 나누지 않는다)
     double averageSpeed() const;
 
@@ -72,6 +73,9 @@ private:
     std::array<std::map<HourKey, std::uint64_t>, server::parser::kModuleCount> _buckets;
     std::uint64_t _validSpdSamples = 0;
     std::uint64_t _excludedSpdSamples = 0;  // 파싱은 됐으나 도메인 범위 밖 (평균에서 제외)
+    // 계수는 됐으나 spd 필드 자체가 부재 (리뷰 2 부재 관용의 산물). 스킵이 아니라 지표 —
+    // 항등식: BeamSteer 계수 = valid + excluded + missing (리뷰 3 계약, 테스트로 고정)
+    std::uint64_t _missingSpdSamples = 0;
     double _spdSum = 0.0;
 };
 
