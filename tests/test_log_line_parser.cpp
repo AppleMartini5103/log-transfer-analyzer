@@ -158,9 +158,57 @@ TEST_CASE("stage 1: frame structure violations") {
             SkipReason::BadFrame);  // 빈 헤더 필드
     REQUIRE(reasonOf(parser, "[2026-06-19_22:00:00.000000][7710][30482][1885246073] BYDA::"
                              "RadarTrackNodeState") == SkipReason::BadFrame);  // 메시지 없음
-    REQUIRE(reasonOf(parser, lineWith("RadarTrackNodeState", "node_state_synced: rfLane[3], "
-                                                             "lockState[1->0]")) ==
-            SkipReason::BadFrame);  // 필수 필드(nodeUID) 부재
+}
+
+// ── 리뷰 2 완화: 관측 필드는 "존재하면 엄격, 부재는 관용" (kModules 주석 참조) ──
+
+TEST_CASE("relaxation: a known-module line missing observed fields still counts") {
+    LogLineParser parser;
+    // intField 부재 (nodeUID) — 종전에는 BadFrame으로 폐기되던 형태
+    REQUIRE(parser.parse(lineWith("RadarTrackNodeState",
+                                  "node_state_synced: rfLane[3], lockState[1->0]"))
+                .ok);
+    // arrowField 부재 (lockState)
+    REQUIRE(parser.parse(lineWith("RadarTrackNodeState", "node_state_synced: nodeUID[47], "
+                                                         "rfLane[3]"))
+                .ok);
+    // 두 번째 intField 부재 (gatedFlag)
+    REQUIRE(parser.parse(lineWith("SectorSchedulerRTS", "job_gated: jobID[9]")).ok);
+}
+
+TEST_CASE("relaxation: absence is not a bypass - corruption is still caught") {
+    LogLineParser parser;
+    // 괄호를 깨뜨린 훼손(nodeUID[)은 필드 검사보다 앞의 bracketsSane에서 걸린다 —
+    // 관용이 우회로를 열지 않았음을 직접 고정하는 음성 테스트
+    REQUIRE(reasonOf(parser, lineWith("RadarTrackNodeState",
+                                      "node_state_synced: nodeUID[, rfLane[3]")) ==
+            SkipReason::BadBracket);
+    // 존재하는 필드의 비정상 값은 여전히 차단 (독약 방어 불변)
+    REQUIRE(reasonOf(parser, lineWith("RadarTrackNodeState",
+                                      "node_state_synced: nodeUID[NONE], rfLane[3], "
+                                      "lockState[1->0]")) == SkipReason::BadNumber);
+    REQUIRE(reasonOf(parser, lineWith("RadarTrackNodeState",
+                                      "node_state_synced: nodeUID[47], rfLane[3], "
+                                      "lockState[10]")) == SkipReason::BadNumber);
+}
+
+TEST_CASE("relaxation: BeamSteer splits by which field is missing") {
+    LogLineParser parser;
+    // advDelta만 부재 → 카운트 + spd 표본 정상 산입 (검증만 하고 결과에 안 쓰는 필드)
+    const auto noAdv =
+        parser.parse(lineWith("BeamSteerCtrlUnitImpl", "unitAddr[4181], spd[137500.000000]"));
+    REQUIRE(noAdv.ok);
+    REQUIRE(noAdv.line.hasSpd);
+    REQUIRE(noAdv.line.spdInRange);
+    // spd만 부재 → 카운트되지만 표본 없음 (valid_spd_samples 증가 없음)
+    const auto noSpd =
+        parser.parse(lineWith("BeamSteerCtrlUnitImpl", "unitAddr[4181], advDelta[62750.000000]"));
+    REQUIRE(noSpd.ok);
+    REQUIRE_FALSE(noSpd.line.hasSpd);
+    // 존재하는 spd의 비정상 값은 여전히 차단
+    REQUIRE(reasonOf(parser, lineWith("BeamSteerCtrlUnitImpl",
+                                      "unitAddr[4181], spd[fast], advDelta[1.0]")) ==
+            SkipReason::BadNumber);
 }
 
 TEST_CASE("stage 2: timestamp format and calendar validity") {

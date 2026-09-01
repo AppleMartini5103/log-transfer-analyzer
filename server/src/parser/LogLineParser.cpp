@@ -184,10 +184,17 @@ bool findField(std::string_view message, std::string_view name, std::string_view
     return false;
 }
 
-// ── 모듈 화이트리스트 + 모듈별 필수 필드 명세 (design 4 로그 실측 스키마) ──
+// ── 모듈 화이트리스트 + 모듈별 관측 필드 명세 (design 4 로그 실측 스키마) ──
 // 통계와 무관한 필드는 구조(괄호 짝)만 확인 — 과잉 거부 방지 (4단계 규칙).
-// 문서화된 숫자 필드는 전부 검증 — CorruptPayload(nodeUID[NONE], rfLane[X]) 방어.
-// ※ 필수 필드 목록은 design 4의 관측 스키마 기준 — 500MB 실물 검증(다음 이슈)에서 최종 확정
+// 문서화된 숫자 필드는 "존재하면 엄격, 부재는 관용" (리뷰 2, design 4-1 갱신):
+//   - 존재하는 값의 비정상(nodeUID[NONE], rfLane[X])은 여전히 차단 — CorruptPayload 방어
+//   - 부재는 스킵 사유가 아니다. 이 목록은 500MB 표본의 관측 스키마일 뿐이라, 부재를
+//     훼손으로 단정하면 스키마가 조금 다른 정상 로그의 라인을 통째로 잃는다 (필드 과신).
+//   - 관용이 우회로가 되지 않는 근거: bracketsSane()이 이 검사보다 앞서 돈다. nodeUID[
+//     처럼 괄호를 깨뜨린 훼손은 BAD_BRACKET으로 먼저 걸리므로, 여기 도달한 "부재"는
+//     훼손이 아니라 스키마 차이만을 의미한다.
+//   - 483MB 실측(2026-09-02): 부재로 스킵되던 정상 라인 0건 — 이 완화는 참조 로그의
+//     판정을 하나도 바꾸지 않으며(스킵 26건 전원 독약), 미래 스키마 변화만 대비한다.
 struct ModuleSpec {
     std::string_view name;
     std::array<std::string_view, 2> intFields;   // 빈 항목은 ""
@@ -334,40 +341,47 @@ LogLineParser::Result LogLineParser::parse(std::string_view text, bool tooLong) 
         }
         std::string_view token;
         if (!findField(message, fieldName, token)) {
-            return skip(SkipReason::BadFrame);  // 필수 필드 부재 = 정상 구조 불일치
+            continue;  // 부재는 관용 — 근거는 kModules 주석 (bracketsSane이 앞서 돈다)
         }
         std::int64_t value = 0;
         SkipReason reason{};
         if (!parseInt64Field(token, value, reason)) {
-            return skip(reason);
+            return skip(reason);  // 존재하면 엄격 — 독약 방어 불변
         }
     }
     if (!spec->arrowField.empty()) {
         std::string_view token;
-        if (!findField(message, spec->arrowField, token)) {
-            return skip(SkipReason::BadFrame);
-        }
-        if (!isArrowPair(token)) {
-            return skip(SkipReason::BadNumber);
+        if (findField(message, spec->arrowField, token) && !isArrowPair(token)) {
+            return skip(SkipReason::BadNumber);  // 부재는 관용, 존재하면 형식 검증
         }
     }
 
     // 작업2 재료: BeamSteerCtrlUnitImpl의 spd/advDelta (double + isfinite + 도메인 범위)
+    // 부재 관용의 두 갈래 (리뷰 2):
+    //   - advDelta 부재 → 카운트 + spd 표본 정상 산입 (unitAddr처럼 검증만 하고 결과에
+    //     쓰지 않는 필드라 같은 취급이 일관된다)
+    //   - spd 부재 → 카운트되지만 표본 없음. 이 라인 수는 현재 CSV에서
+    //     "BeamSteer 계수 − valid − excluded"로 유도만 가능하다 — 라벨 붙은 행
+    //     (missing_spd_samples)으로의 노출은 리뷰 3의 CSV 작업에서 함께 한다
     if (line.module == ModuleId::BeamSteerCtrlUnitImpl) {
         std::string_view spdToken;
         std::string_view advToken;
-        if (!findField(message, "spd", spdToken) || !findField(message, "advDelta", advToken)) {
-            return skip(SkipReason::BadFrame);
-        }
+        const bool hasSpdField = findField(message, "spd", spdToken);
+        const bool hasAdvField = findField(message, "advDelta", advToken);
         double spd = 0.0;
         double advDelta = 0.0;
-        if (!parseDoubleField(spdToken, spd) || !parseDoubleField(advToken, advDelta)) {
+        if (hasSpdField && !parseDoubleField(spdToken, spd)) {
+            return skip(SkipReason::BadNumber);  // 존재하면 엄격
+        }
+        if (hasAdvField && !parseDoubleField(advToken, advDelta)) {
             return skip(SkipReason::BadNumber);
         }
-        line.hasSpd = true;
-        line.spdInRange = spd >= kSpdMin && spd < kSpdMax;
-        line.spd = line.spdInRange ? spd : 0.0;
-        // 범위 밖(8.9e20류)은 라인 자체는 유효 — 표본만 제외 (excluded_spd_samples 재료)
+        if (hasSpdField) {
+            line.hasSpd = true;
+            line.spdInRange = spd >= kSpdMin && spd < kSpdMax;
+            line.spd = line.spdInRange ? spd : 0.0;
+            // 범위 밖(8.9e20류)은 라인 자체는 유효 — 표본만 제외 (excluded_spd_samples 재료)
+        }
     }
 
     // 전 단계 통과 — 첫 정상 라인이면 세션 앵커 확정
