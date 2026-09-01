@@ -470,6 +470,21 @@ The four controls the assignment asks for map onto the window like this:
 the client receives and CRC-checks it automatically the moment the server sends it, and this button
 is the step that puts it on disk. Naming it after what it does keeps the label honest.
 
+Right after the CRC check the client also reads the CSV's metric block and, when the server
+reports skipped lines, logs one warning:
+
+```
+[Warn] 26 of 3483528 lines were skipped - BAD_FRAME 13, UNKNOWN_MODULE 13
+```
+
+The parser behind it is deliberately lenient, because a strict one would recreate the very defect
+this warning exists to catch ("a small format change and data disappears without a word" — this
+time in the client). It splits blocks on the blank line and looks rows up by name, never by
+position; it collects reason rows by the `skip_reason_` prefix without hardcoding the code list,
+showing the top three by count; if `total_lines` is missing it drops the percentage and shows
+absolute counts; and no parsing failure of any kind blocks **Save** — a malformed summary costs
+the warning, never the result file.
+
 The screenshot is the finished state of a 483 MB transfer, and it shows the one combination that
 needs explaining: the indicator reads **Disconnected** while **Save** is enabled.
 
@@ -673,8 +688,11 @@ recorded with their reason code and byte offset, capped at 200 bytes each and wi
 characters escaped, and the report states how many further lines were omitted. A few million
 damaged lines therefore cannot fill the disk — the log about bounded buffers is itself bounded.
 
-`result.csv` also carries `skipped_lines`, so the evidence that skipping happened is visible in the
-deliverable itself.
+`result.csv` also carries the evidence in the deliverable itself: `skipped_lines` with the total,
+and one `skip_reason_<CODE>` row per non-zero reason (see the output format section). The reason
+codes in the CSV are exactly the codes of the table above — the same `skipReasonCode()` strings —
+so the report and the CSV cannot drift apart. The client reads these rows to warn the user; a
+format change that silently discards lines is therefore no longer silent anywhere in the chain.
 
 ---
 
@@ -689,15 +707,31 @@ AntennaProfileSpec,2026-06-19 22,23502
 ...
 
 metric,value
+total_lines,3483528
 avg_speed,137500.000000
 valid_spd_samples,580661
 excluded_spd_samples,0
+missing_spd_samples,0
 skipped_lines,26
+skip_reason_BAD_FRAME,13
+skip_reason_UNKNOWN_MODULE,13
 ```
 
 The hour key includes the date because the reference log spans 24.7 hours, so hour 22 occurs on two
 different days and would otherwise collide. Rows are sorted by module name, then chronologically.
 A label line such as `[Task 1]` was rejected precisely because it breaks CSV parsers.
+
+The metric block is a name contract, not a layout: row names are stable, consumers look rows up by
+name rather than by position, and unknown rows must be ignored — that is what lets the server add
+rows without breaking existing readers. Three rows need their semantics stated. `total_lines` is
+the denominator the client uses for its skip warning, published explicitly because deriving it by
+summing buckets goes wrong exactly when it matters most — when `MAP_LIMIT` has truncated the
+buckets. `skip_reason_<CODE>` rows carry the per-reason skip counts, emitted only for non-zero
+reasons in code-alphabetical order; an absent row means zero, and the full table including zeros
+lives in `skip_report.txt`. `missing_spd_samples` counts lines that were **counted, not skipped** —
+a known-module line whose `spd` field is absent contributes to Task 1 but not to the average — and
+completes the identity `BeamSteerCtrlUnitImpl bucket total = valid + excluded + missing`, which a
+unit test pins.
 
 ---
 
