@@ -14,4 +14,6 @@ skip_report.txt
 3rdparty/libuv/lib/
 3rdparty/catch2/include/
 3rdparty/catch2/lib/
+3rdparty/gtest/include/
+3rdparty/gtest/lib/
 out/

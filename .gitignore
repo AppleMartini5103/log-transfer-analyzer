@@ -87,6 +87,8 @@ client_scenario_*.bin
 3rdparty/libuv/lib/
 3rdparty/catch2/include/
 3rdparty/catch2/lib/
+3rdparty/gtest/include/
+3rdparty/gtest/lib/
 # imgui는 라이브러리를 만들지 않고 소스를 client 타깃에 직접 컴파일한다
 # (3rdparty/imgui/build_window.bat 주석 참조) — include/ 와 src/ 모두 생성물.
 3rdparty/imgui/include/
