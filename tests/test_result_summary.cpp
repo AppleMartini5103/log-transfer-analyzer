@@ -9,14 +9,14 @@ using client::summarizeResultCsv;
 
 namespace {
 
-// 서버가 실제로 내보낸 result.csv(2026-09-02, 483MB 참조 로그, 커밋 95dc45a)의 형태다.
-// 버킷 행은 125개지만 블록 인식만 확인하면 되므로 3개만 남겼고, metric 블록은 한 글자도
-// 바꾸지 않았다 — 계약 위반을 놓치지 않으려면 이 블록이 실물이어야 한다.
+// 서버가 실제로 내보낸 result.csv(2026-09-02, 483MB 참조 로그, 커밋 95dc45a)에서 옮겨왔다.
+// 버킷 행은 125개지만 블록 인식만 확인하면 되므로 앞의 3개만 남겼고, 값은 실물 그대로다.
+// metric 블록은 한 글자도 바꾸지 않았다 — 계약 위반을 놓치지 않으려면 실물이어야 한다.
 const std::string kRealCsv =
     "module,hour,count\n"
-    "AntennaProfileSpec,2026-06-19 22,23206\n"
-    "BeamSteerCtrlUnitImpl,2026-06-19 22,23226\n"
-    "RadarTrackNodeState,2026-06-19 22,46429\n"
+    "AntennaProfileSpec,2026-06-19 22,23502\n"
+    "BeamSteerCtrlUnitImpl,2026-06-19 22,23531\n"
+    "RadarTrackNodeState,2026-06-19 22,47315\n"
     "\n"
     "metric,value\n"
     "total_lines,3483528\n"

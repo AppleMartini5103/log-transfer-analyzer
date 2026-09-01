@@ -481,8 +481,9 @@ The parser behind it is deliberately lenient, because a strict one would recreat
 this warning exists to catch ("a small format change and data disappears without a word" — this
 time in the client). It splits blocks on the blank line and looks rows up by name, never by
 position; it collects reason rows by the `skip_reason_` prefix without hardcoding the code list,
-showing the top three by count; if `total_lines` is missing it drops the percentage and shows
-absolute counts; and no parsing failure of any kind blocks **Save** — a malformed summary costs
+showing the top three by count; if `total_lines` is missing it drops the `of M` denominator and
+reports the count alone — a percentage is never shown, because 26 of 3.4M rounds to 0.00% and
+says less than the pair does; and no parsing failure of any kind blocks **Save** — a malformed summary costs
 the warning, never the result file.
 
 The screenshot is the finished state of a 483 MB transfer, and it shows the one combination that
