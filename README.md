@@ -707,6 +707,41 @@ codes in the CSV are exactly the codes of the table above — the same `skipReas
 so the report and the CSV cannot drift apart. The client reads these rows to warn the user; a
 format change that silently discards lines is therefore no longer silent anywhere in the chain.
 
+### The module whitelist is an observation, not a specification
+
+The five module names were read off the reference log. Nothing in the assignment lists them, so
+the whitelist is a judgement about how far to trust what one sample showed — and it has a cost.
+A module that is genuinely new, added by a later release of the system that writes these logs,
+is not recognised, and every one of its lines is skipped.
+
+We keep it anyway, because in this log the module name is itself a corruption vector. Thirteen of
+the twenty-six skipped lines are `BeyondLimit` and `CorruptPayload`, and reaching `UNKNOWN_MODULE`
+proves they passed every earlier stage: frame, timestamp, header numbers, bracket pairing. Remove
+the name check and those thirteen become statistics. The same rule that would drop a legitimate
+new module is the rule that catches half the damage in the file. Making the list configurable was
+considered and rejected: it moves the judgement into a default value rather than removing it, and
+the default would still be these five names.
+
+The sample cannot settle it either way. A brand-new module and a corruption disguised as a module
+name look identical in the data we were given; all the sample says is that in *this* file, every
+unknown name was damage. Generalising that into "unknown name means damage" is an inference the
+sample cannot support — the same shape as the ambiguity described below.
+
+So the rule stays and its cost is made visible rather than left implied. `result.csv` carries
+`skip_reason_UNKNOWN_MODULE` with the count and the client raises a warning from it; the server's
+`skip_report.txt` names which unknown modules appeared and how often, bounded and escaped the same
+way the rest of the skip log is, because a module name is text an attacker controls. An operator
+who sees a large `UNKNOWN_MODULE` count can find out what was dropped without reading the log by
+hand.
+
+`tests/e2e/check_unknown_module.py` demonstrates this end to end: it builds a log of 1,250 lines
+where 250 belong to a module that is structurally valid but not on the list, uploads it, and
+checks that those 250 are skipped, that the reason is `UNKNOWN_MODULE` and nothing else, that the
+five known modules survive intact, and that Task 2 is untouched. `--write-only` emits just the log
+file, for uploading through the client by hand. `--self-test` runs the assertions against
+fabricated results — an unknown module counted instead of skipped, a known module come up short,
+the wrong reason code, a missing denominator — to show they reject a wrong one.
+
 ### One ambiguity the specification does not settle
 
 Task 1 counts module occurrences per hour; Task 2 averages speeds. The assignment defines each,
