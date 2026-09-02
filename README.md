@@ -695,6 +695,40 @@ codes in the CSV are exactly the codes of the table above — the same `skipReas
 so the report and the CSV cannot drift apart. The client reads these rows to warn the user; a
 format change that silently discards lines is therefore no longer silent anywhere in the chain.
 
+### One ambiguity the specification does not settle
+
+Task 1 counts module occurrences per hour; Task 2 averages speeds. The assignment defines each,
+but not what happens to a line that fails Task 2 — a `BeamSteerCtrlUnitImpl` line whose `spd` is
+corrupt still names a real module at a real time. Whether it belongs in Task 1's tally is a
+reading, not a fact, and the reading changes the number.
+
+Three readings are all consistent with the assignment:
+
+| | `spd[fast]` | `spd[8.9e20]` | `nodeUID[NONE]` |
+|---|---|---|---|
+| Strict — any corrupt field drops the line | out | out | out |
+| **Ours** — unparseable drops it, out-of-range and absent do not | out | in | out |
+| Lenient — a valid module and hour is enough | in | in | in |
+
+We chose the middle one: a non-numeric value where a number belongs reads as frame corruption,
+while a well-formed number outside the domain leaves the line intact and disqualifies only the
+sample (`excluded_spd_samples`). The boundary is arguable — both cases end at "the speed is
+unusable" — so the choice is recorded here rather than left implicit in the code.
+
+What it costs is bounded and countable from the output. Once a line's module and hour are known
+valid, only `BAD_NUMBER`, `NUM_OUT_OF_RANGE` and `MAP_LIMIT` can still remove it, so the sum of
+those `skip_reason_` rows bounds how many lines the reading is worth. It is an upper bound rather
+than an exact count: the first two codes also cover the header numbers, which are checked before
+the module is matched, and a line rejected there was never a candidate to begin with. **On the
+reference log all three are zero** — every one of its 26 skips is caught earlier, by frame
+structure or by the module whitelist — so the bound is tight, the three readings produce identical
+output on the sample data, and they diverge only on real data.
+
+The sample cannot tell you which reading you picked, so choosing one quietly would have kept the
+difference invisible until real data arrived. Where a requirement admits more than one reading, we
+record the alternatives and the count that moves between them, and put the question to whoever
+owns the specification rather than settling it on our own.
+
 ---
 
 ## 7. Output format
