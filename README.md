@@ -734,6 +734,15 @@ way the rest of the skip log is, because a module name is text an attacker contr
 who sees a large `UNKNOWN_MODULE` count can find out what was dropped without reading the log by
 hand.
 
+![250 of 1,250 lines skipped because their module is not on the list](client/docs/client-unknown-module.png)
+
+That is the failure this section describes, as a user meets it. The log is the one
+`check_unknown_module.py --write-only` produces, sent over the LAN from the client. The transfer
+succeeds and `result.csv` arrives and can be saved — the loss does not break the run — but the
+twenty percent that was dropped is stated with its reason rather than left for the reader to
+notice. The five known modules in the same file came through at 200 each, and the server's
+`skip_report.txt` for that session names `SectorHealthMonitor` as the module behind the count.
+
 `tests/e2e/check_unknown_module.py` demonstrates this end to end: it builds a log of 1,250 lines
 where 250 belong to a module that is structurally valid but not on the list, uploads it, and
 checks that those 250 are skipped, that the reason is `UNKNOWN_MODULE` and nothing else, that the
