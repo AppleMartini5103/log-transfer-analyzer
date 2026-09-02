@@ -662,9 +662,16 @@ A line passes through five stages in order and stops at the first failure:
 | 0 · bytes | length cap, empty/blank, control characters, `\r` handling | `LINE_TOO_LONG`, `EMPTY`, `CTRL_CHAR` |
 | 1 · frame | `[ts][pid][tid][sess] BYDA::Module: message` by position | `BAD_FRAME` |
 | 2 · timestamp | format, calendar validity, ±48 h from the first good line | `BAD_TIMESTAMP`, `TS_OUT_OF_RANGE` |
-| 3 · numbers | `from_chars`, full-token consumption, `int64` range, `isfinite` | `BAD_NUMBER`, `NUM_OUT_OF_RANGE` |
-| 4 · domain | bracket pairing, module whitelist, speed range | `BAD_BRACKET`, `UNKNOWN_MODULE` |
+| 3 · header numbers | `from_chars`, full-token consumption, `int64` range | `BAD_NUMBER`, `NUM_OUT_OF_RANGE` |
+| 4 · domain | bracket pairing, module whitelist, then that module's own fields under the same numeric rules plus `isfinite` and the speed range | `BAD_BRACKET`, `UNKNOWN_MODULE`, `BAD_NUMBER`, `NUM_OUT_OF_RANGE` |
 | 5 · resources | statistics map entry cap | `MAP_LIMIT` |
+
+Two details of that table are easy to misread. `BAD_NUMBER` and `NUM_OUT_OF_RANGE` come from two
+different stages — the header fields at stage 3, before the module is known, and the module's own
+fields at stage 4, after the whitelist has accepted it — so a count of either code mixes lines that
+were never candidates for the statistics with lines that were. And the speed range check produces
+no reason code at all: an out-of-range speed leaves the line valid and only disqualifies the sample
+(`excluded_spd_samples`). What does produce `BAD_NUMBER` at stage 4 is a speed that fails to parse.
 
 Details that matter in practice:
 
@@ -674,6 +681,11 @@ Details that matter in practice:
   one damaged line carries `spd[888888888888888888888.88]`, which `stod` accepts happily as
   8.9e20 and which would destroy the average. Every number is range-checked after parsing, and
   every double is checked with `isfinite` because `from_chars` accepts `inf` and `nan` as text.
+  In the reference log that particular line never reaches the range check: its module name is
+  `BeyondLimit`, which the whitelist rejects one step earlier, so it is counted under
+  `UNKNOWN_MODULE` and `excluded_spd_samples` reads zero. The range check is depth behind the
+  whitelist, not the thing that caught this one — which is also why the sample data cannot
+  demonstrate that it works, and unit tests carry that burden instead.
 * **Length-based string handling** (`string_view`) throughout, so an embedded null byte truncates
   nothing.
 * **Timestamps are range-checked against the session.** A random far-future timestamp would parse
