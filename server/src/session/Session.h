@@ -58,9 +58,30 @@ struct SessionTimeouts {
     std::uint64_t responseMs = common::protocol::kResponseTimeoutMs;  // ②류 120초
 };
 
+// 마지막으로 완료된 분석의 보관본 (design 8번 ResultRequest — 다운로드 재개).
+// 청구표(filename/fileSize/uploadCrc32)는 인증이 아니라 "남의 결과를 건네지 않기" 위한 대조표다:
+// 같은 파일을 가진 사람은 어차피 업로드로 같은 결과를 얻으므로 노출이 늘지 않는다.
+struct RetainedResult {
+    std::string filename;
+    std::uint64_t fileSize = 0;
+    std::uint32_t uploadCrc32 = 0;  // 트레일러와 대조가 끝난 페이로드 CRC
+    std::string csv;                // 완성 CSV 전체 — 재요청 시 csv[startOffset..]을 보낸다
+    std::uint32_t csvCrc32 = 0;     // 완성 CSV 전체의 CRC (조각의 것이 아니다)
+};
+
 class ISessionObserver {
 public:
     virtual ~ISessionObserver() = default;
+    // 분석이 완료된 세션만 호출한다 — 중단된 세션은 AnalysisResult 자체를 만들지 않으므로
+    // (ParserThread::finishSession은 업로드 완료 시에만 실행) 검증되지 않은 결과가
+    // 보관본에 들어갈 구조적 여지가 없다. 부분 결과 우회로가 생기지 않는다는 뜻이다.
+    virtual void onResultRetained(RetainedResult) {}
+    // 청구표 세 필드가 모두 맞는 보관본을 돌려준다. 없으면 nullptr (→ Ack(NoSuchResult)).
+    // 반환 포인터는 관찰자 소유이며 세션이 응답을 보내는 동안 유효하다 (같은 루프 스레드)
+    virtual const RetainedResult* lookupRetainedResult(const std::string&, std::uint64_t,
+                                                       std::uint32_t) const {
+        return nullptr;
+    }
     // 소켓이 완전히 닫힌 뒤 호출 — 이 시점 이후 세션 객체를 파괴해도 안전하다.
     // 호출 문맥은 세션 자신의 콜백 안이므로 여기서 즉시 파괴하지 말 것 (지연 파괴)
     virtual void onSessionFinished() {}
@@ -107,6 +128,9 @@ private:
 
     // ── 단계별 처리 (소비한 바이트 수를 반환) ──
     std::size_t consumeHeader(std::string_view data);
+    // WAIT_HEADER에 온 결과 재요청 — 보관본을 csv[startOffset..]부터 다시 보낸다.
+    // 상태는 추가하지 않는다: 기존 송신 경로(SENDING_RESULT → WAIT_DONE → CLEANUP)를 그대로 쓴다
+    void handleResultRequest();
     std::size_t consumePayload(std::string_view data);
     std::size_t consumeTrailer(std::string_view data);
     std::size_t consumeDone(std::string_view data);

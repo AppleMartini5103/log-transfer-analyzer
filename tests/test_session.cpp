@@ -602,3 +602,306 @@ TEST_CASE("session: statistics from a CRC-failed upload never reach the next res
     // ② 정상 세션의 카운트가 보낸 줄 수와 정확히 같다 (합산되지 않았다)
     REQUIRE(bucketTotal(csv, kModuleB) == kLinesB);
 }
+
+// ── 결과 보관 (design 8번 ResultRequest — 다운로드 재개의 서버 쪽 절반) ──
+
+namespace {
+
+// 정상 왕복 한 바퀴를 돌고 서버가 보낸 CSV를 돌려준다 (보관본과 대조하기 위한 원본)
+std::string runFullSession(Fixture& fixture, const std::string& payload,
+                           const std::string& filename) {
+    TestClient client{&fixture.loop};
+    REQUIRE(client.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return client.connectDone; }));
+    REQUIRE(client.socket.startRead() == 0);
+    REQUIRE(client.socket.send(asString(headerBytes(payload.size(), filename))) == 0);
+    REQUIRE(client.socket.send(payload) == 0);
+    REQUIRE(client.socket.send(asString(trailerBytes(common::crc32(0, payload)))) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] {
+        return client.received.size() >= proto::kAckSize + proto::kResultHeaderSize;
+    }));
+
+    proto::ResultHeader header;
+    const std::string_view afterAck = std::string_view{client.received}.substr(proto::kAckSize);
+    REQUIRE(proto::decode(afterAck, header) == proto::DecodeStatus::Ok);
+    REQUIRE(runUntil(&fixture.loop, [&] {
+        return client.received.size() >=
+               proto::kAckSize + proto::kResultHeaderSize + header.csvSize;
+    }));
+    const std::string csv =
+        client.received.substr(proto::kAckSize + proto::kResultHeaderSize, header.csvSize);
+
+    REQUIRE(client.socket.send(asString(proto::encodeDownloadDone())) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return !fixture.manager->hasActiveSession(); }));
+    return csv;
+}
+
+constexpr const char* kLineA =
+    "[2026-06-19_22:00:00.000000][7710][30482][1] BYDA::RadarTrackNodeState: nodeUID[47]\n";
+
+}  // namespace
+
+TEST_CASE("retention: a completed session keeps its result for re-request") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    const std::string csv = runFullSession(fixture, payload, "keep.log");
+
+    // 세션 객체는 이미 파괴됐지만 보관본은 SessionManager에 남는다
+    REQUIRE_FALSE(fixture.manager->hasActiveSession());
+    REQUIRE(fixture.manager->hasRetainedResult());
+
+    const auto* kept = fixture.manager->retainedResult("keep.log", payload.size(),
+                                                       common::crc32(0, payload));
+    REQUIRE(kept != nullptr);
+    REQUIRE(kept->csv == csv);  // 보낸 것과 바이트 동일 — 재요청은 같은 바이트를 잇는다
+    REQUIRE(kept->csvCrc32 == common::crc32(0, csv));
+    REQUIRE(kept->fileSize == payload.size());
+}
+
+TEST_CASE("retention: the claim table must match on all three fields") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    runFullSession(fixture, payload, "claim.log");
+    const std::uint32_t crc = common::crc32(0, payload);
+
+    REQUIRE(fixture.manager->retainedResult("claim.log", payload.size(), crc) != nullptr);
+    // 하나라도 어긋나면 주지 않는다 — 남의 결과를 건네지 않기 위한 대조표다
+    REQUIRE(fixture.manager->retainedResult("other.log", payload.size(), crc) == nullptr);
+    REQUIRE(fixture.manager->retainedResult("claim.log", payload.size() + 1, crc) == nullptr);
+    REQUIRE(fixture.manager->retainedResult("claim.log", payload.size(), crc ^ 1u) == nullptr);
+}
+
+TEST_CASE("retention: nothing is kept before the first completed upload") {
+    Fixture fixture;
+    REQUIRE_FALSE(fixture.manager->hasRetainedResult());
+    REQUIRE(fixture.manager->retainedResult("any.log", 1, 0) == nullptr);
+}
+
+TEST_CASE("retention: a new completed upload replaces the previous result") {
+    Fixture fixture;
+    const std::string first = kLineA;
+    const std::string second = std::string{kLineA} + kLineA;  // 라인 수가 달라 CSV도 다르다
+    runFullSession(fixture, first, "first.log");
+    const std::string secondCsv = runFullSession(fixture, second, "second.log");
+
+    REQUIRE(fixture.manager->retainedResult("first.log", first.size(),
+                                            common::crc32(0, first)) == nullptr);
+    const auto* kept = fixture.manager->retainedResult("second.log", second.size(),
+                                                       common::crc32(0, second));
+    REQUIRE(kept != nullptr);
+    REQUIRE(kept->csv == secondCsv);
+}
+
+TEST_CASE("retention: an aborted upload leaves no result behind") {
+    // 음성 테스트 — 폐기 사슬(이슈 #74)과 상충하지 않음을 고정한다.
+    // 중단 세션은 finishSession()을 타지 않으므로 AnalysisResult 자체가 없고,
+    // 따라서 검증되지 않은 통계가 보관본으로 새어나갈 구조적 여지가 없다.
+    Fixture fixture;
+    TestClient client{&fixture.loop};
+    REQUIRE(client.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return client.connectDone; }));
+    REQUIRE(client.socket.startRead() == 0);
+
+    const std::string payload = kLineA;
+    REQUIRE(client.socket.send(asString(headerBytes(payload.size(), "bad.log"))) == 0);
+    REQUIRE(client.socket.send(payload) == 0);
+    // 틀린 CRC → Ack(CrcMismatch) 후 세션 종료, 분석은 수행되지 않는다
+    REQUIRE(client.socket.send(asString(trailerBytes(common::crc32(0, payload) ^ 0xFFFFu))) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return client.received.size() >= proto::kAckSize; }));
+
+    proto::Ack ack;
+    REQUIRE(proto::decode(client.received, ack) == proto::DecodeStatus::Ok);
+    REQUIRE(ack.status == proto::AckStatus::CrcMismatch);
+    REQUIRE(runUntil(&fixture.loop, [&] { return !fixture.manager->hasActiveSession(); }));
+
+    REQUIRE_FALSE(fixture.manager->hasRetainedResult());
+    REQUIRE(fixture.manager->retainedResult("bad.log", payload.size(),
+                                            common::crc32(0, payload)) == nullptr);
+}
+
+// ── 결과 재요청 (ResultRequest) — 끊긴 다운로드가 500MB 재업로드를 부르지 않게 한다 ──
+
+namespace {
+
+std::vector<char> resultRequestBytes(const std::string& filename, std::uint64_t fileSize,
+                                     std::uint32_t crc, std::uint64_t startOffset) {
+    proto::ResultRequest request;
+    request.filename = filename;
+    request.fileSize = fileSize;
+    request.crc32 = crc;
+    request.startOffset = startOffset;
+    return proto::encode(request);
+}
+
+// 재요청 한 번. 서버 응답 전체(Ack 또는 ResultHeader+본문)를 그대로 돌려준다
+std::string requestResult(Fixture& fixture, const std::string& filename, std::uint64_t fileSize,
+                          std::uint32_t crc, std::uint64_t startOffset,
+                          std::size_t expectBytes) {
+    TestClient client{&fixture.loop};
+    REQUIRE(client.socket.connect("127.0.0.1", fixture.port) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return client.connectDone; }));
+    REQUIRE(client.socket.startRead() == 0);
+    REQUIRE(client.socket.send(asString(
+                resultRequestBytes(filename, fileSize, crc, startOffset))) == 0);
+    REQUIRE(runUntil(&fixture.loop, [&] { return client.received.size() >= expectBytes; }));
+    const std::string response = client.received;
+    client.socket.close();
+    runUntil(&fixture.loop, [&] { return !fixture.manager->hasActiveSession(); });
+    return response;
+}
+
+}  // namespace
+
+TEST_CASE("re-request: the retained result comes back byte-identical from offset 0") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    const std::string csv = runFullSession(fixture, payload, "again.log");
+
+    const std::string response = requestResult(fixture, "again.log", payload.size(),
+                                               common::crc32(0, payload), 0,
+                                               proto::kResultHeaderSize + csv.size());
+    proto::ResultHeader header;
+    REQUIRE(proto::decode(response, header) == proto::DecodeStatus::Ok);
+    // 헤더는 언제나 완성 CSV 전체의 크기·CRC다 (조각의 것이 아니다)
+    REQUIRE(header.csvSize == csv.size());
+    REQUIRE(header.crc32 == common::crc32(0, csv));
+    REQUIRE(response.substr(proto::kResultHeaderSize) == csv);
+    // 파서를 다시 돌린 것이 아니라 보관본을 준 것이다 — 재실행이었다면 통계가 비어
+    // 버킷 없는 CSV가 왔을 것이다 (세션 종료 시 통계는 리셋된다)
+    REQUIRE(csv.find("RadarTrackNodeState") != std::string::npos);
+}
+
+TEST_CASE("re-request: a mid-stream offset returns exactly the remaining bytes") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    const std::string csv = runFullSession(fixture, payload, "mid.log");
+    const std::uint64_t got = csv.size() / 3;  // 클라이언트가 이만큼 받고 끊겼다고 가정
+
+    const std::string response =
+        requestResult(fixture, "mid.log", payload.size(), common::crc32(0, payload), got,
+                      proto::kResultHeaderSize + (csv.size() - got));
+    proto::ResultHeader header;
+    REQUIRE(proto::decode(response, header) == proto::DecodeStatus::Ok);
+    REQUIRE(header.csvSize == csv.size());  // 전체 크기 — "남은 바이트"가 아니다
+    const std::string tail = response.substr(proto::kResultHeaderSize);
+    REQUIRE(tail == csv.substr(got));
+    // 이어 붙이면 원본과 같고, 그때 전체 CRC 검증이 성립한다
+    REQUIRE(csv.substr(0, got) + tail == csv);
+    REQUIRE(common::crc32(0, csv.substr(0, got) + tail) == header.crc32);
+}
+
+TEST_CASE("re-request: offset equal to the size sends the header and no body") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    const std::string csv = runFullSession(fixture, payload, "full.log");
+
+    const std::string response = requestResult(fixture, "full.log", payload.size(),
+                                               common::crc32(0, payload), csv.size(),
+                                               proto::kResultHeaderSize);
+    proto::ResultHeader header;
+    REQUIRE(proto::decode(response, header) == proto::DecodeStatus::Ok);
+    REQUIRE(header.csvSize == csv.size());
+    REQUIRE(response.size() == proto::kResultHeaderSize);  // 본문 0바이트
+}
+
+TEST_CASE("re-request: an offset past the end is a protocol error") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    const std::string csv = runFullSession(fixture, payload, "past.log");
+
+    const std::string response = requestResult(fixture, "past.log", payload.size(),
+                                               common::crc32(0, payload), csv.size() + 1,
+                                               proto::kAckSize);
+    proto::Ack ack;
+    REQUIRE(proto::decode(response, ack) == proto::DecodeStatus::Ok);
+    REQUIRE(ack.status == proto::AckStatus::ProtocolError);
+}
+
+TEST_CASE("re-request: a mismatched claim gets NoSuchResult, never someone else's result") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    runFullSession(fixture, payload, "mine.log");
+    const std::uint32_t crc = common::crc32(0, payload);
+
+    for (const auto& wrong : {std::string{"theirs.log"}, std::string{"mine.log"}}) {
+        const bool wrongName = (wrong == "theirs.log");
+        const std::string response =
+            requestResult(fixture, wrong, wrongName ? payload.size() : payload.size() + 7,
+                          crc, 0, proto::kAckSize);
+        proto::Ack ack;
+        INFO("claim: " << wrong);
+        REQUIRE(proto::decode(response, ack) == proto::DecodeStatus::Ok);
+        REQUIRE(ack.status == proto::AckStatus::NoSuchResult);
+    }
+    // CRC만 어긋난 경우도 같다
+    const std::string response = requestResult(fixture, "mine.log", payload.size(), crc ^ 1u, 0,
+                                               proto::kAckSize);
+    proto::Ack ack;
+    REQUIRE(proto::decode(response, ack) == proto::DecodeStatus::Ok);
+    REQUIRE(ack.status == proto::AckStatus::NoSuchResult);
+}
+
+TEST_CASE("re-request: nothing retained yet also gets NoSuchResult") {
+    Fixture fixture;  // 첫 기동 — 보관본 없음
+    const std::string response = requestResult(fixture, "never.log", 10, 0, 0, proto::kAckSize);
+    proto::Ack ack;
+    REQUIRE(proto::decode(response, ack) == proto::DecodeStatus::Ok);
+    REQUIRE(ack.status == proto::AckStatus::NoSuchResult);
+}
+
+TEST_CASE("re-request: the result survives repeated requests (idempotent)") {
+    Fixture fixture;
+    const std::string payload = kLineA;
+    const std::string csv = runFullSession(fixture, payload, "twice.log");
+    const std::uint32_t crc = common::crc32(0, payload);
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        INFO("attempt " << attempt);
+        const std::string response =
+            requestResult(fixture, "twice.log", payload.size(), crc, 0,
+                          proto::kResultHeaderSize + csv.size());
+        REQUIRE(response.substr(proto::kResultHeaderSize) == csv);
+    }
+    REQUIRE(fixture.manager->hasRetainedResult());  // 재요청은 보관본을 소비하지 않는다
+}
+
+TEST_CASE("re-request: a download cut short is recovered without re-uploading") {
+    // 보관 시점이 "분석 완료"이지 "전송 성공"이 아니라는 것을 고정한다 —
+    // 결과를 받다 끊긴 클라이언트가 500MB를 다시 보내지 않아도 되는 이유다
+    Fixture fixture;
+    const std::string payload = kLineA;
+    std::string csv;
+    std::uint64_t got = 0;
+    {
+        TestClient client{&fixture.loop};
+        REQUIRE(client.socket.connect("127.0.0.1", fixture.port) == 0);
+        REQUIRE(runUntil(&fixture.loop, [&] { return client.connectDone; }));
+        REQUIRE(client.socket.startRead() == 0);
+        REQUIRE(client.socket.send(asString(headerBytes(payload.size(), "cut.log"))) == 0);
+        REQUIRE(client.socket.send(payload) == 0);
+        REQUIRE(client.socket.send(asString(trailerBytes(common::crc32(0, payload)))) == 0);
+        REQUIRE(runUntil(&fixture.loop, [&] {
+            return client.received.size() >= proto::kAckSize + proto::kResultHeaderSize;
+        }));
+        proto::ResultHeader header;
+        const std::string_view afterAck =
+            std::string_view{client.received}.substr(proto::kAckSize);
+        REQUIRE(proto::decode(afterAck, header) == proto::DecodeStatus::Ok);
+        REQUIRE(runUntil(&fixture.loop, [&] {
+            return client.received.size() >=
+                   proto::kAckSize + proto::kResultHeaderSize + header.csvSize;
+        }));
+        csv = client.received.substr(proto::kAckSize + proto::kResultHeaderSize, header.csvSize);
+        got = csv.size() / 2;  // 절반만 받았다고 보고 DownloadDone 없이 끊는다
+        client.socket.close();
+        REQUIRE(runUntil(&fixture.loop, [&] { return !fixture.manager->hasActiveSession(); }));
+    }
+
+    const std::string response =
+        requestResult(fixture, "cut.log", payload.size(), common::crc32(0, payload), got,
+                      proto::kResultHeaderSize + (csv.size() - got));
+    proto::ResultHeader header;
+    REQUIRE(proto::decode(response, header) == proto::DecodeStatus::Ok);
+    REQUIRE(csv.substr(0, got) + response.substr(proto::kResultHeaderSize) == csv);
+    REQUIRE(common::crc32(0, csv) == header.crc32);
+}

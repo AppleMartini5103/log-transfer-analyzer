@@ -145,6 +145,30 @@ void SessionManager::onListenError(int status) {
     common::Logger::instance().error(std::string{"Listener error: "} + uv_strerror(status));
 }
 
+void SessionManager::onResultRetained(RetainedResult result) {
+    // 새 완료분이 이전 보관본을 대체한다. CSV는 수 KB(선언 상한 4MiB)라 50MB 예산에 무해하다
+    _retained = std::move(result);
+    _hasRetained = true;
+    common::Logger::instance().info("Result retained for re-request (" + _retained.filename +
+                                    ", csv " + std::to_string(_retained.csv.size()) + " bytes)");
+}
+
+const RetainedResult* SessionManager::lookupRetainedResult(const std::string& filename,
+                                                           std::uint64_t fileSize,
+                                                           std::uint32_t uploadCrc32) const {
+    return retainedResult(filename, fileSize, uploadCrc32);
+}
+
+const RetainedResult* SessionManager::retainedResult(const std::string& filename,
+                                                     std::uint64_t fileSize,
+                                                     std::uint32_t uploadCrc32) const {
+    if (!_hasRetained || _retained.filename != filename || _retained.fileSize != fileSize ||
+        _retained.uploadCrc32 != uploadCrc32) {
+        return nullptr;
+    }
+    return &_retained;
+}
+
 void SessionManager::onSessionFinished() {
     // 세션 자신의 콜백 안에서 불린다 — 여기서 파괴하면 실행 중인 객체를 없애는 것이므로
     // idle 핸들로 한 틱 미룬다

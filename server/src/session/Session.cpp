@@ -50,7 +50,7 @@ Session::Session(uv_loop_t* loop, std::unique_ptr<common::net::ISocket> socket,
       _observer(observer),
       _timer(loop),
       _timeouts(timeouts),
-      _framer(proto::MessageType::UploadHeader),
+      _framer(proto::MessageType::UploadHeader, proto::MessageType::ResultRequest),
       _parser(parser),
       _readBuffer(chunkSize) {}
 
@@ -212,6 +212,12 @@ std::size_t Session::consumeHeader(std::string_view data) {
             return 0;
     }
 
+    // WAIT_HEADER에는 두 가지가 올 수 있다: 새 업로드와 결과 재요청 (design 8번)
+    if (_framer.messageType() == proto::MessageType::ResultRequest) {
+        handleResultRequest();
+        return result.consumed;
+    }
+
     proto::UploadHeader header;
     const proto::DecodeStatus decoded = proto::decode(_framer.message(), header);
     if (decoded == proto::DecodeStatus::BadValue) {
@@ -231,6 +237,57 @@ std::size_t Session::consumeHeader(std::string_view data) {
                                     std::to_string(_fileSize) + " bytes)");
     transition(SessionState::Receiving);
     return result.consumed;
+}
+
+void Session::handleResultRequest() {
+    proto::ResultRequest request;
+    const proto::DecodeStatus decoded = proto::decode(_framer.message(), request);
+    if (decoded == proto::DecodeStatus::BadValue) {
+        failWithAck(proto::AckStatus::ProtocolError, "invalid result request value");
+        return;
+    }
+    if (decoded != proto::DecodeStatus::Ok) {
+        closeSilently("result request decode failed");
+        return;
+    }
+
+    const RetainedResult* kept =
+        _observer == nullptr
+            ? nullptr
+            : _observer->lookupRetainedResult(request.filename, request.fileSize, request.crc32);
+    if (kept == nullptr) {
+        // 보관본이 없거나(재시작·교체) 청구표가 어긋난다 — 클라이언트는 재업로드로 간다
+        failWithAck(proto::AckStatus::NoSuchResult, "no retained result for this claim");
+        return;
+    }
+    if (request.startOffset > kept->csv.size()) {
+        failWithAck(proto::AckStatus::ProtocolError, "result offset beyond csv size");
+        return;
+    }
+
+    _filename = request.filename;
+    _csv = kept->csv;  // 루프 소유 복사본 — 보관본은 다음 재요청을 위해 그대로 남는다
+
+    // ResultHeader는 항상 "완성 CSV 전체"의 크기·CRC다. 뒤따르는 바이트가 조각이어도
+    // 클라이언트가 이어 붙인 뒤 전체 무결성을 검증할 수 있어야 하기 때문이다
+    proto::ResultHeader header;
+    header.csvSize = _csv.size();
+    header.crc32 = kept->csvCrc32;
+    const auto headerBytes = proto::encode(header);
+
+    transition(SessionState::SendingResult);
+    common::Logger::instance().info(
+        "Session: result re-request accepted (" + _filename + ", resuming at " +
+        std::to_string(request.startOffset) + " of " + std::to_string(_csv.size()) + " bytes)");
+    if (_socket->send(std::string_view{headerBytes.data(), headerBytes.size()}) != 0) {
+        cleanup("failed to send ResultHeader");
+        return;
+    }
+    // startOffset == csvSize면 본문이 비어 있다 — 헤더만 보내고 WAIT_DONE으로 간다
+    const std::string_view body = std::string_view{_csv}.substr(request.startOffset);
+    if (!body.empty() && _socket->send(body) != 0) {
+        cleanup("failed to send result.csv");
+    }
 }
 
 std::size_t Session::consumePayload(std::string_view data) {
@@ -328,6 +385,18 @@ void Session::onAnalysisComplete(server::parser::AnalysisResult result) {
         return;  // 이미 정리됐거나 이전 세션의 결과 — 무시
     }
     _csv = std::move(result.csv);  // 완성 버퍼 소유권이 루프로 이동했다
+
+    // 전송 "전에" 보관한다 — SENDING_RESULT 도중 연결이 끊겨도 보관본이 남아야
+    // 재요청으로 이어붙일 수 있다. 보관 시점이 분석 완료이지 전송 성공이 아닌 이유다.
+    if (_observer != nullptr) {
+        RetainedResult retained;
+        retained.filename = _filename;
+        retained.fileSize = _fileSize;
+        retained.uploadCrc32 = _payloadCrc;  // 트레일러와 일치가 확인된 값 (verifyAndAck)
+        retained.csv = _csv;                 // 수 KB 복사 — 루프 스레드 소유본
+        retained.csvCrc32 = result.crc32;
+        _observer->onResultRetained(std::move(retained));
+    }
 
     proto::ResultHeader header;
     header.csvSize = _csv.size();

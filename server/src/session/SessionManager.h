@@ -43,12 +43,23 @@ public:
     bool hasActiveSession() const { return _session != nullptr; }
     std::uint64_t completedSessions() const { return _completedSessions; }
 
+    // 보관본 조회 — 청구표 세 필드가 모두 일치할 때만 준다. 하나라도 어긋나면 nullptr
+    // (= Ack(NoSuchResult)). "재접속하면 마지막 결과를 준다"로 하면 A의 결과가 B에게 간다.
+    const RetainedResult* retainedResult(const std::string& filename, std::uint64_t fileSize,
+                                         std::uint32_t uploadCrc32) const;
+    bool hasRetainedResult() const { return _hasRetained; }
+
 private:
     // ── IListenerCallback ──
     void onConnection() override;
     void onListenError(int status) override;
     // ── ISessionObserver ──
     void onSessionFinished() override;
+    // 분석 완료본을 루프 스레드 소유 복사본으로 보관한다 (1개 — 1:1이라 동시 세션이 없다).
+    // Session은 파괴돼도 SessionManager는 살아 있으므로 재요청 세션이 이 값을 쓸 수 있다.
+    void onResultRetained(RetainedResult result) override;
+    const RetainedResult* lookupRetainedResult(const std::string& filename, std::uint64_t fileSize,
+                                               std::uint32_t uploadCrc32) const override;
 
     void acceptIfIdle();
     // 파서가 이전 세션의 폐기를 끝낸 뒤에만 accept한다 (경쟁 조건 해소)
@@ -64,6 +75,8 @@ private:
     int _socketBufferSize = 0;
     SessionTimeouts _timeouts;
     std::uint64_t _completedSessions = 0;
+    RetainedResult _retained;      // 마지막 완료 분석 — 새 업로드가 완료되면 교체된다
+    bool _hasRetained = false;     // 메모리 전용: 데몬 재시작이면 사라진다 (→ NoSuchResult)
     bool _pendingConnection = false;  // 세션 중에 온 연결 — CLEANUP 후 받는다
     bool _sessionFinished = false;
     bool _closing = false;
