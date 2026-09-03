@@ -238,7 +238,10 @@ DecodeStatus decode(ByteView buf, Ack& out) {
         return DecodeStatus::NeedMoreData;
     }
     const std::uint8_t status = byteAt(buf, kPreambleSize);
-    if (status > static_cast<std::uint8_t>(AckStatus::ServerError)) {
+    // 상한은 마지막으로 정의된 상태 코드다. NoSuchResult(재요청 전용)를 enum에만 더하고
+    // 이 검사를 두고 오면, 서버가 보낸 Ack을 클라이언트가 BadValue로 거부한다 — 실제로
+    // 그렇게 한 번 어긋났다. enum이 늘면 이 상한도 함께 움직여야 한다
+    if (status > static_cast<std::uint8_t>(AckStatus::NoSuchResult)) {
         return DecodeStatus::BadValue;  // 미지의 상태 코드 — default-deny
     }
     out.status = static_cast<AckStatus>(status);
