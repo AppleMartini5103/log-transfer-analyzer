@@ -339,7 +339,7 @@ TEST_CASE("codec: ResultRequest BadValue rejections") {
     SECTION("path separators and control chars in filename") {
         for (const std::string& bad :
              {std::string{"a/b.log"}, std::string{"a\b.log"}, std::string{"a	b.log"},
-              std::string{"a m.log", 7}}) {
+              std::string{"a\x00m.log", 7}}) {
             auto in = base();
             in.filename = bad;
             proto::ResultRequest out;
