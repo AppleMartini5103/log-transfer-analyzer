@@ -148,3 +148,85 @@ TEST_CASE("framer: fixed-size messages complete at exact boundary") {
     REQUIRE(r.consumed == proto::kDownloadDoneSize);
     REQUIRE(proto::decodeDownloadDone(framer.message()) == DecodeStatus::Ok);
 }
+
+// ── WAIT_HEADER의 두 타입 허용 + 가변 길이 메시지의 목표 크기 (ResultRequest) ──
+
+TEST_CASE("framer: a ResultRequest is framed when the header slot allows both types") {
+    // 회귀: 목표 크기를 UploadHeader(18B)로 고정해 두면 ResultRequest의 길이 프리픽스(28B)에
+    // 닿지 못해 한 바이트도 소비하지 못한 채 같은 판정을 반복한다 — 실제로 무한 루프였다
+    proto::ResultRequest request;
+    request.fileSize = 506286814;
+    request.crc32 = 0x1234ABCD;
+    request.startOffset = 4096;
+    request.filename = "BYDA_Test_Log_500MB.log";
+    const auto bytes = proto::encode(request);
+
+    proto::Framer framer{proto::MessageType::UploadHeader, proto::MessageType::ResultRequest};
+    const auto fed = framer.feed(proto::ByteView{bytes.data(), bytes.size()});
+    REQUIRE(fed.status == proto::DecodeStatus::Ok);
+    REQUIRE(fed.consumed == bytes.size());
+    REQUIRE(framer.messageType() == proto::MessageType::ResultRequest);
+
+    proto::ResultRequest decoded;
+    REQUIRE(proto::decode(framer.message(), decoded) == proto::DecodeStatus::Ok);
+    REQUIRE(decoded.filename == request.filename);
+    REQUIRE(decoded.startOffset == request.startOffset);
+}
+
+TEST_CASE("framer: a ResultRequest split one byte at a time is reassembled") {
+    proto::ResultRequest request;
+    request.fileSize = 1;
+    request.crc32 = 7;
+    request.startOffset = 0;
+    request.filename = "a.log";
+    const auto bytes = proto::encode(request);
+
+    proto::Framer framer{proto::MessageType::UploadHeader, proto::MessageType::ResultRequest};
+    for (std::size_t i = 0; i + 1 < bytes.size(); ++i) {
+        const auto fed = framer.feed(proto::ByteView{bytes.data() + i, 1});
+        INFO("byte " << i);
+        REQUIRE(fed.status == proto::DecodeStatus::NeedMoreData);
+        REQUIRE(fed.consumed == 1);
+    }
+    const auto last = framer.feed(proto::ByteView{bytes.data() + bytes.size() - 1, 1});
+    REQUIRE(last.status == proto::DecodeStatus::Ok);
+}
+
+TEST_CASE("framer: a maximum-length ResultRequest filename still fits the buffer") {
+    // 285B — UploadHeader의 273B보다 크다. 버퍼가 273B이던 동안에는 BadValue로 잘못 거부됐다
+    proto::ResultRequest request;
+    request.filename = std::string(proto::kMaxFilenameLen, 'n');
+    const auto bytes = proto::encode(request);
+    REQUIRE(bytes.size() == proto::kResultRequestMaxSize);
+
+    proto::Framer framer{proto::MessageType::UploadHeader, proto::MessageType::ResultRequest};
+    const auto fed = framer.feed(proto::ByteView{bytes.data(), bytes.size()});
+    REQUIRE(fed.status == proto::DecodeStatus::Ok);
+    REQUIRE(fed.consumed == bytes.size());
+}
+
+TEST_CASE("framer: allowing two types does not admit a third") {
+    proto::ResultHeader header;  // 서버→클라 메시지 — 이 자리에 올 수 없다
+    header.csvSize = 10;
+    header.crc32 = 0;
+    const auto bytes = proto::encode(header);
+
+    proto::Framer framer{proto::MessageType::UploadHeader, proto::MessageType::ResultRequest};
+    REQUIRE(framer.feed(proto::ByteView{bytes.data(), bytes.size()}).status ==
+            proto::DecodeStatus::BadType);
+}
+
+TEST_CASE("framer: the reserved Heartbeat type is still refused") {
+    // type=6은 번호만 예약된 자리다 (design 12번). 실수로 열리지 않았음을 고정한다
+    std::array<char, proto::kPreambleSize> preamble{};
+    preamble[0] = static_cast<char>(0x42);
+    preamble[1] = static_cast<char>(0x59);
+    preamble[2] = static_cast<char>(0x44);
+    preamble[3] = static_cast<char>(0x41);
+    preamble[proto::kOffsetVersion] = static_cast<char>(proto::kProtocolVersion);
+    preamble[proto::kOffsetType] = static_cast<char>(6);
+
+    proto::Framer framer{proto::MessageType::UploadHeader, proto::MessageType::ResultRequest};
+    REQUIRE(framer.feed(proto::ByteView{preamble.data(), preamble.size()}).status ==
+            proto::DecodeStatus::BadType);
+}
