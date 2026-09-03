@@ -126,6 +126,12 @@ DecodeStatus expectedMessageSize(ByteView buf, std::size_t& outSize) {
         case MessageType::DownloadDone:
             outSize = kDownloadDoneSize;
             return DecodeStatus::Ok;
+        case MessageType::ResultRequest:
+            if (buf.size() < kResultRequestFixedSize) {
+                return DecodeStatus::NeedMoreData;  // filenameLen(u16)까지 있어야 크기 확정
+            }
+            outSize = kResultRequestFixedSize + getU16(buf, kPreambleSize + 20);
+            return DecodeStatus::Ok;
     }
     return DecodeStatus::BadType;  // 미지의 type (Heartbeat=6 예약 포함 — 미구현이므로 거부)
 }
@@ -163,6 +169,18 @@ std::vector<char> encode(const ResultHeader& msg) {
     putPreamble(out, MessageType::ResultHeader);
     putU64(out, msg.csvSize);
     putU32(out, msg.crc32);
+    return out;
+}
+
+std::vector<char> encode(const ResultRequest& msg) {
+    std::vector<char> out;
+    out.reserve(kResultRequestFixedSize + msg.filename.size());
+    putPreamble(out, MessageType::ResultRequest);
+    putU64(out, msg.fileSize);
+    putU32(out, msg.crc32);
+    putU64(out, msg.startOffset);
+    putU16(out, static_cast<std::uint16_t>(msg.filename.size()));
+    out.insert(out.end(), msg.filename.begin(), msg.filename.end());
     return out;
 }
 
@@ -238,6 +256,42 @@ DecodeStatus decode(ByteView buf, ResultHeader& out) {
     }
     out.csvSize = getU64(buf, kPreambleSize);
     out.crc32 = getU32(buf, kPreambleSize + 8);
+    return DecodeStatus::Ok;
+}
+
+DecodeStatus decode(ByteView buf, ResultRequest& out) {
+    const DecodeStatus pre = checkPreamble(buf, MessageType::ResultRequest);
+    if (pre != DecodeStatus::Ok) {
+        return pre;
+    }
+    if (buf.size() < kResultRequestFixedSize) {
+        return DecodeStatus::NeedMoreData;  // filenameLen(u16)까지 있어야 크기 확정
+    }
+    const std::uint64_t fileSize = getU64(buf, kPreambleSize);
+    const std::uint32_t crc = getU32(buf, kPreambleSize + 8);
+    const std::uint64_t startOffset = getU64(buf, kPreambleSize + 12);
+    const std::uint16_t nameLen = getU16(buf, kPreambleSize + 20);
+    if (buf.size() < kResultRequestFixedSize + nameLen) {
+        return DecodeStatus::NeedMoreData;
+    }
+    // 값 검증 (검증 실패 ② 부류) — 길이 프리픽스 검증 후 가변부 접근 (컨벤션 9번 순서)
+    if (fileSize > kMaxFileSize) {
+        return DecodeStatus::BadValue;
+    }
+    // 어떤 결과보다도 큰 오프셋은 쓰레기 값이다. csvSize 대비 판정은 보관본을 아는
+    // 세션의 몫이지만(초과 시 PROTOCOL_ERROR), 프로토콜 상한 초과는 여기서 끊는다 —
+    // kMaxCsvSize를 둔 것과 같은 논리로, 값을 믿고 계산하기 전에 거부한다.
+    if (startOffset > kMaxCsvSize) {
+        return DecodeStatus::BadValue;
+    }
+    const ByteView name = buf.substr(kResultRequestFixedSize, nameLen);
+    if (!isValidFilename(name)) {
+        return DecodeStatus::BadValue;
+    }
+    out.fileSize = fileSize;
+    out.crc32 = crc;
+    out.startOffset = startOffset;
+    out.filename.assign(name);
     return DecodeStatus::Ok;
 }
 

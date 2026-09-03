@@ -30,6 +30,8 @@ TEST_CASE("protocol: message sizes match design section 8") {
     REQUIRE(proto::kAckSize == 17);
     REQUIRE(proto::kResultHeaderSize == 20);
     REQUIRE(proto::kDownloadDoneSize == 8);
+    REQUIRE(proto::kResultRequestFixedSize == 30);  // 8 + 8 + 4 + 8 + 2
+    REQUIRE(proto::kResultRequestMaxSize == 285);   // 30 + filename 255
 }
 
 TEST_CASE("protocol: wire enum values are fixed") {
@@ -38,12 +40,16 @@ TEST_CASE("protocol: wire enum values are fixed") {
     REQUIRE(static_cast<std::uint8_t>(proto::MessageType::Ack) == 3);
     REQUIRE(static_cast<std::uint8_t>(proto::MessageType::ResultHeader) == 4);
     REQUIRE(static_cast<std::uint8_t>(proto::MessageType::DownloadDone) == 5);
+    // 6은 Heartbeat 예약 (design 12번 973행) — ResultRequest가 그 자리를 쓰지 않는다.
+    // 하트비트 전환 조건(design 9번)이 발동할 때 버전을 올리지 않고 추가하기 위한 자리다.
+    REQUIRE(static_cast<std::uint8_t>(proto::MessageType::ResultRequest) == 7);
 
     REQUIRE(static_cast<std::uint8_t>(proto::AckStatus::Ok) == 0);
     REQUIRE(static_cast<std::uint8_t>(proto::AckStatus::CrcMismatch) == 1);
     REQUIRE(static_cast<std::uint8_t>(proto::AckStatus::SizeMismatch) == 2);
     REQUIRE(static_cast<std::uint8_t>(proto::AckStatus::ProtocolError) == 3);
     REQUIRE(static_cast<std::uint8_t>(proto::AckStatus::ServerError) == 4);
+    REQUIRE(static_cast<std::uint8_t>(proto::AckStatus::NoSuchResult) == 5);
 
     // 와이어에 1바이트로 실리는 타입이 실제로 u8인지 (암묵 확장 방지)
     STATIC_REQUIRE(std::is_same_v<std::underlying_type_t<proto::MessageType>, std::uint8_t>);

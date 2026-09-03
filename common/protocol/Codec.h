@@ -36,6 +36,7 @@ std::vector<char> encode(const UploadHeader& msg);
 std::vector<char> encode(const UploadTrailer& msg);
 std::vector<char> encode(const Ack& msg);
 std::vector<char> encode(const ResultHeader& msg);
+std::vector<char> encode(const ResultRequest& msg);
 std::vector<char> encodeDownloadDone();
 
 // ── 디코드 (수신 측 — 프리앰블 검증 + 값 검증 포함, default-deny) ───────────
@@ -44,6 +45,7 @@ DecodeStatus decode(ByteView buf, UploadHeader& out);
 DecodeStatus decode(ByteView buf, UploadTrailer& out);
 DecodeStatus decode(ByteView buf, Ack& out);
 DecodeStatus decode(ByteView buf, ResultHeader& out);
+DecodeStatus decode(ByteView buf, ResultRequest& out);
 DecodeStatus decodeDownloadDone(ByteView buf);  // 본문 없음 — 프리앰블 검증만
 
 }  // namespace common::protocol

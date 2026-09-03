@@ -29,6 +29,10 @@ enum class MessageType : std::uint8_t {
     Ack = 3,            // 서버→클라: status u8 + receivedBytes u64
     ResultHeader = 4,   // 서버→클라: csvSize u64 + crc32 u32 (직후 CSV 스트림)
     DownloadDone = 5,   // 클라→서버: 본문 없음
+    // 6은 위 주석의 Heartbeat 예약 — 비워 둔다. 여기서 6을 쓰면 하트비트 전환 조건이
+    // 발동할 때 버전을 올려야 하고, 그러면 배포된 바이너리끼리 상호 불통이 된다.
+    ResultRequest = 7,  // 클라→서버: fileSize u64 + crc32 u32 + startOffset u64
+                        //            + filenameLen u16 + filename 가변
 };
 
 // ── Ack 상태 코드 ───────────────────────────────────────────────────────────
@@ -38,6 +42,11 @@ enum class AckStatus : std::uint8_t {
     SizeMismatch = 2,
     ProtocolError = 3,
     ServerError = 4,
+    // 재요청(ResultRequest)에만 쓰인다 — 보관본이 없거나 청구표가 어긋난 경우.
+    // ProtocolError와 갈라놓는 이유: 클라이언트가 "재업로드가 필요하다"와 "이 서버는
+    // 재요청을 모른다"를 구분해 알려야 한다. 후자는 옛 서버가 type=7을 BadType으로
+    // 거부할 때 돌아온다.
+    NoSuchResult = 5,
 };
 
 // ── 메시지 크기 (프리앰블 포함 전체 바이트) ─────────────────────────────────
@@ -49,6 +58,9 @@ inline constexpr std::size_t kUploadTrailerSize = kPreambleSize + 4;   // = 12
 inline constexpr std::size_t kAckSize = kPreambleSize + 1 + 8;         // = 17
 inline constexpr std::size_t kResultHeaderSize = kPreambleSize + 8 + 4;  // = 20
 inline constexpr std::size_t kDownloadDoneSize = kPreambleSize;        // = 8 (본문 없음)
+inline constexpr std::size_t kResultRequestFixedSize = kPreambleSize + 8 + 4 + 8 + 2;  // = 30
+inline constexpr std::size_t kResultRequestMaxSize =
+    kResultRequestFixedSize + kMaxFilenameLen;  // = 285
 
 // ── 값 검증 상한 (design 8번 세부 확정) ─────────────────────────────────────
 // fileSize = 0 허용 (빈 파일도 정상 세션). 8GiB 초과는 u64 쓰레기 값 방어
@@ -110,6 +122,27 @@ struct Ack {
 struct ResultHeader {
     std::uint64_t csvSize = 0;
     std::uint32_t crc32 = 0;  // CSV는 메모리 완성본이라 헤더에 포함 가능 (design 체크섬 설계)
+};
+
+// 결과 재요청 — 결과 수신이 끊긴 클라이언트가 재업로드 없이 이어 받기 위해 보낸다.
+//
+// [왜 필요한가] 끊긴 다운로드가 잃는 것은 CSV 몇 KB가 아니라 500MB 재업로드다.
+//   응답 방향에 이 메시지가 없으면, 5KB를 못 받은 대가로 요청 방향 전체를 다시 치른다.
+//
+// [fileSize/crc32/filename = 청구표] 서버는 보관본을 만든 업로드의 이 세 값과 대조해
+//   일치할 때만 결과를 준다. 인증이 아니다 — 같은 파일을 가진 사람은 어차피 업로드로
+//   같은 결과를 얻으므로 노출이 늘지 않는다. 표의 목적은 접근 통제가 아니라 남의 결과를
+//   잘못 건네지 않는 것이다. 그냥 "재접속하면 마지막 결과를 준다"로 하면 A의 결과가
+//   B에게 가고, 그것이 조용히 잘못된 결과라 가장 나쁘다.
+//
+// [startOffset] 이미 받은 바이트 수. 서버는 csv[startOffset..]을 보내고, ResultHeader의
+//   csvSize/crc32는 여전히 완성 CSV 전체의 값이다 — 그래야 클라이언트가 이어 붙인 뒤
+//   전체 무결성을 검증할 수 있다. "남은 바이트"로 두면 CRC가 조각의 것이 되어 그 검증을 잃는다.
+struct ResultRequest {
+    std::uint64_t fileSize = 0;
+    std::uint32_t crc32 = 0;
+    std::uint64_t startOffset = 0;
+    std::string filename;
 };
 
 // DownloadDone은 본문이 없어 값 타입 불필요 — MessageType만으로 표현
