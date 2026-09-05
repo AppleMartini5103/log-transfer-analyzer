@@ -317,7 +317,7 @@ MSVC and GCC do not agree on padding and alignment.
 ```
 offset 0  magic     4B  'B''Y''D''A'
 offset 4  version   1B  = 1
-offset 5  type      1B  1..5
+offset 5  type      1B  1..5, 7
 offset 6  reserved  2B  = 0 (ignored by the receiver)
 ```
 
@@ -328,6 +328,12 @@ offset 6  reserved  2B  = 0 (ignored by the receiver)
 | 3 `Ack` | server → client | `status u8`, `receivedBytes u64` |
 | 4 `ResultHeader` | server → client | `csvSize u64`, `crc32 u32` |
 | 5 `DownloadDone` | client → server | (no body) |
+| 7 `ResultRequest` | client → server | `fileSize u64`, `crc32 u32`, `startOffset u64`, `filenameLen u16`, `filename` |
+
+Six is missing on purpose. It is reserved for a heartbeat that section 3.5's timeout policy would
+introduce if analysis ever took minutes, and leaving it free means that change would not have to
+raise the protocol version — which would make already-deployed binaries mutually unintelligible.
+A test asserts that type 6 is still rejected, so adding a neighbour cannot quietly claim the slot.
 
 One session is one conversation:
 
@@ -337,10 +343,40 @@ server:  (receive + parse concurrently) → Ack → ResultHeader → result.csv 
 client:  (verify CRC) → DownloadDone → both sides clean up
 ```
 
+If the link drops while the result is arriving, the second conversation is much shorter:
+
+```
+client:  ResultRequest{fileSize, crc32, startOffset, filename}
+server:  ResultHeader → result.csv[startOffset..]   (or Ack(NoSuchResult) and close)
+client:  (verify CRC over the whole assembled file) → DownloadDone
+```
+
 **Why the checksum sits in different places per direction.** For the upload, computing a CRC up
 front would mean reading 500 MB twice, so both sides compute it incrementally over the chunks they
 are already handling and the client sends it in a trailer. The result CSV is only a few kilobytes
 and already complete in memory, so its CRC travels in the header.
+
+**Why the response direction can resume.** A broken download does not cost the result, which is a
+few kilobytes; it costs the upload, which is 500 MB. Without `ResultRequest` the only way to get a
+result whose transfer was interrupted is to send the entire log again, so robustness had been built
+into the request direction and left out of the response direction. The server keeps the last
+completed analysis and serves it from an offset, and `tests/e2e/check_result_resume.py` measures
+exactly that trade: on the reference case it recovers the result by sending **40 bytes** instead of
+re-sending **71,648**. At the scale of the real log that is a request of at most 285 bytes in place
+of a 483 MB upload.
+
+The three upload fields in the request are a claim ticket, not authentication. Whoever holds the
+same file can obtain the same result by uploading it, so requiring them adds no exposure; what they
+prevent is handing one client's result to another. `Ack(NoSuchResult)` is the answer when nothing
+matches — because the server was restarted, because a later upload replaced what it kept, or
+because the claim belongs to a different file. `ResultHeader` keeps describing the *whole* result
+even when only a fragment follows, so the client can verify the CRC over the file it assembles;
+had it described the remainder instead, that check would have been lost.
+
+Retention only ever holds a result from a CRC-verified upload. An aborted session never produces
+one — the analysis is discarded rather than finished — so there is no path by which a partial
+analysis becomes something a client can ask for. That is deliberate, and section 6 explains why a
+partial result was rejected as a feature.
 
 Chunk-level acknowledgements were deliberately left out: TCP already guarantees delivery, so they
 would only add round trips. A single final acknowledgement carries the received byte count and the
@@ -469,6 +505,21 @@ The four controls the assignment asks for map onto the window like this:
 `Save` rather than `Download` because the download already happened: the CSV is a few kilobytes, so
 the client receives and CRC-checks it automatically the moment the server sends it, and this button
 is the step that puts it on disk. Naming it after what it does keeps the label honest.
+
+There is a fifth control beside it, **Get result**, and it exists because losing the download used
+to cost the upload. If the link drops while `result.csv` is arriving, the client keeps what it
+received along with the filename, size and CRC it sent, and this button asks the server to continue
+from that offset instead of sending the log again. It is enabled only while there is something to
+claim and the connection is up, so it is never a button that does nothing when pressed. The four
+controls the assignment names are untouched — this is an addition, not a substitution.
+
+It is deliberately not folded into **Save**. The screen states that Save needs no connection, and
+putting a network request behind it would make that line false.
+
+Two refusals are worth telling apart, so the client does. `NoSuchResult` means the server no longer
+holds it — restarted, or a later upload replaced what it kept. `ProtocolError` is what an older
+server answers, because it does not know the message at all. The user re-sends the file either way,
+but collapsing them would hide that you are talking to a server that predates the feature.
 
 Right after the CRC check the client also reads the CSV's metric block and, when the server
 reports skipped lines, logs one warning:
@@ -706,6 +757,32 @@ and one `skip_reason_<CODE>` row per non-zero reason (see the output format sect
 codes in the CSV are exactly the codes of the table above — the same `skipReasonCode()` strings —
 so the report and the CSV cannot drift apart. The client reads these rows to warn the user; a
 format change that silently discards lines is therefore no longer silent anywhere in the chain.
+
+### A failed upload leaves no statistics behind
+
+Parsing runs while the payload is still arriving, so by the time the trailer's CRC is checked the
+statistics for that upload already exist. If the CRC fails — or the link drops mid-upload — those
+numbers have to be gone before anything else uses the parser, and they belong to the parser thread
+rather than the loop, so the loop cannot reset them itself. It raises an abort flag; the parser
+discards the ring and its counters and only then signals back; and the server does not accept the
+next connection until that signal arrives. Every path that starts a session passes through that
+gate — an earlier fix gated only one of them and the leak simply moved to another.
+
+A timing bug does not prove itself by passing once. `tests/e2e/check_corrupt_isolation.py` drives
+both accept paths and pushes the next client's whole upload into the kernel queue first, so the
+window is actually entered rather than merely approached. With the gate removed the leak reproduces
+in 2 rounds of 80; with it in place, 200 of 200 are clean. The server has to be pinned to one core
+for any of that to be visible: on more cores the two libuv loop iterations between the abort and the
+accept give the parser all the time it needs, and a build with the gate deleted passes 20 of 20 —
+which is how the first version of that script came to prove nothing.
+
+**Why there is no partial result.** Serving the statistics of an interrupted upload was considered
+and rejected. The trailer CRC is the only evidence that the payload arrived intact, so a partial
+analysis is a number computed over bytes nothing has verified — and producing one would mean keeping
+the statistics an aborted session leaves behind, which is exactly the path the gate above exists to
+close. How far an upload got is already answerable: `Ack.receivedBytes` carries it and the client
+prints it on failure. What those bytes would have totalled is a question this design declines to
+answer, rather than answering it wrongly and quietly.
 
 ### The module whitelist is an observation, not a specification
 
