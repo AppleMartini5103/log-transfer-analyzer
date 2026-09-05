@@ -262,6 +262,9 @@ UiCallbacks Application::makeCallbacks() {
 
     callbacks.onCancelUpload = [this] { _worker.post(CancelUploadCommand{}); };
 
+    // 무엇을 어디서부터 청구할지는 워커만 안다 — UI는 "다시 받아라"만 보낸다.
+    callbacks.onRequestResult = [this] { _worker.post(RequestResultCommand{}); };
+
     callbacks.onSaveResult = [this] {
         const std::string csv = _worker.takeResultCsv();
         if (csv.empty()) {
@@ -388,6 +391,9 @@ void Application::pumpWorkerEvents() {
         }
         if (event.hasDownloadProgress) {
             _uiState.downloadProgress = event.downloadProgress;
+        }
+        if (event.hasResultClaim) {
+            _uiState.resultClaimAvailable = event.resultClaimAvailable;
         }
         if (!event.message.empty()) {
             _uiState.log(event.level, event.message);

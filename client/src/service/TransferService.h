@@ -50,6 +50,11 @@ public:
         float downloadProgress = 0.0f;
         bool hasDownloadProgress = false;
 
+        // 서버가 이 클라이언트의 결과를 아직 들고 있을 가능성 — Get result의 근거.
+        // 워커만이 청구표(파일명·크기·CRC)와 재개 지점을 알고 있으므로 UI에 통보한다.
+        bool resultClaimAvailable = false;
+        bool hasResultClaim = false;
+
         common::LogLevel level = common::LogLevel::Info;
         std::string message;  // 비어 있으면 로그 없음
     };
@@ -90,6 +95,7 @@ private:
 
     bool beginConnect(const std::string& ip, std::uint16_t port);
     void handle(const CancelUploadCommand& command);
+    void handle(const RequestResultCommand& command);
     void handle(const QuitCommand& command);
     void closeSocket();
     void pushEvent(Event event);
@@ -108,6 +114,10 @@ private:
     std::size_t handleAckBytes(std::string_view data);
     std::size_t handleResultHeaderBytes(std::string_view data);
     std::size_t handleCsvBytes(std::string_view data);
+    // 재요청의 응답은 Ack(거절) 또는 ResultHeader(수락) 둘 중 하나다.
+    std::size_t handleResumeReplyBytes(std::string_view data);
+    bool beginCsvReceive(const common::protocol::ResultHeader& header, bool resuming);
+    void dropResultClaim();
     void finishDownload();
     void failSession(const std::string& reason, common::LogLevel level);
 
@@ -173,7 +183,7 @@ private:
 
     // 수신 상태 (루프 스레드 전용). 세션 순서가 고정이라 "지금 기대하는 것"이 하나로 정해진다:
     // Ack -> ResultHeader -> CSV 페이로드 -> (DownloadDone 송신) -> 완료
-    enum class Expecting : std::uint8_t { Nothing, Ack, ResultHeader, CsvPayload };
+    enum class Expecting : std::uint8_t { Nothing, Ack, ResultHeader, CsvPayload, ResumeReply };
     Expecting _expecting = Expecting::Nothing;
     common::protocol::Framer _framer{common::protocol::MessageType::Ack};
 
@@ -181,6 +191,25 @@ private:
     std::uint64_t _csvSize = 0;
     std::uint32_t _csvExpectedCrc = 0;
     float _lastReportedDownload = -1.0f;
+
+    // ── 결과 청구권 ─────────────────────────────────────────────────────────
+    // 끊긴 결과 수신이 잃는 것은 CSV 몇 KB가 아니라 500MB 재업로드다. 서버는 마지막
+    // 완료 분석을 보관하고 있으므로, 그것을 만든 업로드의 파일명·크기·CRC를 들고 있으면
+    // 재업로드 없이 이어 받을 수 있다. 세 값은 이미 업로드에 실어 보낸 것들이라 새로
+    // 만들어 낼 상태가 아니다.
+    //
+    // 켜는 시점이 Ack(Ok) 수신인 이유: 그때가 "서버가 이 업로드를 받아들였고 결과를
+    // 만들 것"이 확정되는 지점이다. 그전에 켜면 CRC 불일치로 거절된 업로드에 대해서도
+    // 있지도 않은 결과를 청구하게 된다.
+    struct ResultClaim {
+        std::string filename;
+        std::uint64_t fileSize = 0;
+        std::uint32_t crc32 = 0;
+        std::uint64_t received = 0;  // 이미 받은 CSV 바이트 수 = 다음 재개 지점
+    };
+    bool _hasClaim = false;
+    ResultClaim _claim;
+    std::string _uploadFilename;  // 헤더에 실어 보낸 이름 — 청구표를 만들 때 필요하다
 
     std::mutex _resultMutex;      // _resultCsv만 보호 (UI가 가져가므로 스레드 경계)
     std::string _resultCsv;

@@ -36,6 +36,7 @@ enum class SessionState : std::uint8_t {
     WaitAck,
     WaitResult,
     ReceivingResult,
+    RequestingResult,  // 재요청을 보내고 서버 응답을 기다리는 중 (Ack 또는 ResultHeader)
     Done,
 };
 
@@ -82,6 +83,11 @@ public:
     float uploadProgress = 0.0f;    // 0.0 ~ 1.0
     float downloadProgress = 0.0f;
 
+    // 서버가 이 클라이언트의 결과를 아직 들고 있을 가능성이 있는가.
+    // 워커가 업로드를 서버에 인정받은 시점에 켜고, 결과를 온전히 받거나 서버가
+    // "그런 결과 없다"고 답하면 끈다. 이 값이 Get result 버튼의 유일한 근거다.
+    bool resultClaimAvailable = false;
+
     UiState();
 
     // 로그는 UI 창과 파일 싱크 양쪽에 남긴다 — 화면은 사용자용, 파일은 사후 확인용.
@@ -96,6 +102,7 @@ public:
 
     // 게이팅 판정 — design 12번 컨트롤 활성 매트릭스를 한곳에서만 계산한다.
     // 화면 여기저기에 조건을 흩뿌리면 상태가 늘 때 반드시 어긋난다.
+    bool canRequestResult() const;
     bool canEditAddress() const;
     bool canConnect() const;
     bool canDisconnect() const;

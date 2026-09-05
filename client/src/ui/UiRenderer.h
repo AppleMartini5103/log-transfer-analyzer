@@ -18,6 +18,7 @@ struct UiCallbacks {
     std::function<void()> onBrowse;
     std::function<void()> onSend;
     std::function<void()> onCancelUpload;
+    std::function<void()> onRequestResult;
     std::function<void()> onSaveResult;
 };
 

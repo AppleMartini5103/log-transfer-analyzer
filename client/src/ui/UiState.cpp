@@ -156,4 +156,11 @@ bool UiState::canSaveResult() const {
     return session == SessionState::Done;
 }
 
+// 재요청은 "받을 결과가 남아 있고, 지금 말을 걸 수 있고, 다른 일을 하고 있지 않을 때"만.
+// Send와 같은 연결 게이팅을 쓰는 이유는 같은 이유에서다 — 끊긴 상태에서 누르면 아무 일도
+// 일어나지 않는 버튼이 되고, 사용자는 그걸 고장으로 읽는다.
+bool UiState::canRequestResult() const {
+    return resultClaimAvailable && link == LinkState::Connected && !isBusy(session);
+}
+
 }  // namespace client

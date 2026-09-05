@@ -351,6 +351,8 @@ void TransferService::handle(const StartUploadCommand& command) {
     }
 
     _uploading = true;
+    _uploadFilename = command.filename;
+    dropResultClaim();  // 새 업로드가 시작되면 서버의 보관본도 곧 교체된다
     _uploadTotal = command.size;
     _uploadSent = 0;
     _uploadCrc = 0;
@@ -475,6 +477,9 @@ void TransferService::onBytes(std::string_view data) {
             case Expecting::CsvPayload:
                 consumed = handleCsvBytes(data);
                 break;
+            case Expecting::ResumeReply:
+                consumed = handleResumeReplyBytes(data);
+                break;
             case Expecting::Nothing:
             default:
                 // 세션 순서상 서버가 말을 걸 차례가 아니다 = 스트림이 꼬였다는 뜻.
@@ -523,6 +528,16 @@ std::size_t TransferService::handleAckBytes(std::string_view data) {
         return 0;
     }
 
+    // 여기서부터 서버는 이 업로드의 결과를 만들고 보관한다 — 이제 청구할 것이 생겼다.
+    _hasClaim = true;
+    _claim = ResultClaim{_uploadFilename, _uploadTotal, _uploadCrc, 0};
+    {
+        Event claimEvent;
+        claimEvent.resultClaimAvailable = true;
+        claimEvent.hasResultClaim = true;
+        pushEvent(std::move(claimEvent));
+    }
+
     pushLog(common::LogLevel::Info,
             "Server verified the upload (" + std::to_string(ack.receivedBytes) +
                 " bytes) - analyzing");
@@ -550,6 +565,16 @@ std::size_t TransferService::handleResultHeaderBytes(std::string_view data) {
         return 0;
     }
 
+    if (!beginCsvReceive(header, false)) {
+        return 0;
+    }
+    return result.consumed;
+}
+
+// ResultHeader를 받아 CSV 수신을 시작한다. 첫 수신과 재개가 같은 함수를 쓰는 이유는,
+// 상한 검증을 한쪽에만 두면 나머지 경로가 조용히 무방비가 되기 때문이다.
+bool TransferService::beginCsvReceive(const common::protocol::ResultHeader& header,
+                                      bool resuming) {
     // 상한 검증은 reserve 앞이어야 한다 — 뒤로 가면 검사할 기회 자체가 없다.
     // csvSize는 상대가 보낸 u64이고 reserve는 그 값을 그대로 믿고 할당한다. 값에 따라
     // terminate(length_error/bad_alloc)거나, 더 나쁘게는 예외 없이 수십 GiB를 커밋해
@@ -559,24 +584,38 @@ std::size_t TransferService::handleResultHeaderBytes(std::string_view data) {
                         std::to_string(header.csvSize) + " bytes > limit " +
                         std::to_string(common::protocol::kMaxCsvSize) + ").",
                     common::LogLevel::Error);
-        return 0;
+        return false;
+    }
+    // 재개인데 이미 받은 양이 전체보다 많다면 서버가 다른 결과를 보내고 있다는 뜻이다.
+    // 그대로 이어 붙이면 CRC만 틀린 채 끝나므로, 무엇이 어긋났는지 말하고 멈춘다.
+    if (resuming && _csv.size() > header.csvSize) {
+        failSession("Server offered a result smaller than what was already received (" +
+                        std::to_string(header.csvSize) + " < " + std::to_string(_csv.size()) +
+                        ") - the retained result is not the one being resumed.",
+                    common::LogLevel::Error);
+        return false;
     }
 
     _csvSize = header.csvSize;
     _csvExpectedCrc = header.crc32;
-    _csv.clear();
+    if (!resuming) {
+        _csv.clear();
+    }
     _csv.reserve(static_cast<std::size_t>(_csvSize));
     _lastReportedDownload = -1.0f;
     _expecting = Expecting::CsvPayload;
 
     pushLog(common::LogLevel::Info,
-            "Receiving result.csv (" + std::to_string(_csvSize) + " bytes)");
+            resuming ? "Resuming result.csv at " + std::to_string(_csv.size()) + " of " +
+                           std::to_string(_csvSize) + " bytes"
+                     : "Receiving result.csv (" + std::to_string(_csvSize) + " bytes)");
     pushSession(SessionState::ReceivingResult);
 
-    if (_csvSize == 0) {
-        finishDownload();  // 빈 CSV도 정상 (design 8번: fileSize 0 세션의 대칭)
+    // 빈 CSV도 정상이고(design 8번: fileSize 0 세션의 대칭), 재개 지점이 끝이면 받을 것이 없다
+    if (_csv.size() == _csvSize) {
+        finishDownload();
     }
-    return result.consumed;
+    return true;
 }
 
 std::size_t TransferService::handleCsvBytes(std::string_view data) {
@@ -594,6 +633,10 @@ std::size_t TransferService::handleCsvBytes(std::string_view data) {
         pushEvent(std::move(event));
     }
 
+    if (_hasClaim) {
+        _claim.received = _csv.size();  // 지금 끊겨도 여기서부터 이어 받는다
+    }
+
     if (_csv.size() == _csvSize) {
         finishDownload();
     }
@@ -604,6 +647,12 @@ void TransferService::finishDownload() {
     // 다운로드 CRC는 헤더에 실려 오므로 수신 완료 후 한 번에 검증한다 (수 KB — design 8번).
     const std::uint32_t actual = common::crc32(0, _csv);
     if (actual != _csvExpectedCrc) {
+        // 이어 붙인 전체가 어긋났다 — 받아 둔 조각을 믿을 수 없으므로 버리고 재개 지점을
+        // 0으로 되돌린다. 청구권 자체는 남겨 처음부터 다시 받을 수 있게 한다.
+        _csv.clear();
+        if (_hasClaim) {
+            _claim.received = 0;
+        }
         failSession("result.csv CRC mismatch (expected " + std::to_string(_csvExpectedCrc) +
                         ", got " + std::to_string(actual) + ")",
                     common::LogLevel::Error);
@@ -620,6 +669,7 @@ void TransferService::finishDownload() {
     }
     _csv.clear();
     _expecting = Expecting::Nothing;
+    dropResultClaim();  // 결과가 손에 들어왔다 — 더 청구할 것이 없다
 
     // 프로토콜의 마지막 한 마디 — 이걸 받아야 서버가 세션을 정리하고 다음 연결을 받는다.
     const std::vector<char> done = common::protocol::encodeDownloadDone();
@@ -646,6 +696,95 @@ void TransferService::finishDownload() {
     pushSession(SessionState::Done);
 }
 
+void TransferService::dropResultClaim() {
+    _hasClaim = false;
+    _claim = ResultClaim{};
+    Event event;
+    event.resultClaimAvailable = false;
+    event.hasResultClaim = true;
+    pushEvent(std::move(event));
+}
+
+void TransferService::handle(const RequestResultCommand&) {
+    if (!_hasClaim) {
+        pushLog(common::LogLevel::Warn, "No result to recover - send the file first.");
+        return;
+    }
+    if (!_socket) {
+        pushLog(common::LogLevel::Warn, "Connect to the server before requesting the result.");
+        return;
+    }
+
+    common::protocol::ResultRequest request;
+    request.fileSize = _claim.fileSize;
+    request.crc32 = _claim.crc32;
+    request.startOffset = _claim.received;
+    request.filename = _claim.filename;
+
+    const std::vector<char> bytes = common::protocol::encode(request);
+    if (_socket->send(std::string_view(bytes.data(), bytes.size())) != 0) {
+        failSession("Failed to send the result request.", common::LogLevel::Error);
+        return;
+    }
+
+    // 응답은 둘 중 하나다 — 거절이면 Ack, 수락이면 곧바로 ResultHeader.
+    _framer.reset(common::protocol::MessageType::Ack, common::protocol::MessageType::ResultHeader);
+    _expecting = Expecting::ResumeReply;
+    _sessionCompleted = false;
+    pushLog(common::LogLevel::Info,
+            "Requesting the result from " + std::to_string(_claim.received) + " of " +
+                std::to_string(_csvSize) + " bytes - the file is not being sent again");
+    pushSession(SessionState::RequestingResult);
+}
+
+std::size_t TransferService::handleResumeReplyBytes(std::string_view data) {
+    const auto result = _framer.feed(common::protocol::ByteView{data.data(), data.size()});
+    if (result.status == common::protocol::DecodeStatus::NeedMoreData) {
+        return result.consumed;
+    }
+    if (result.status != common::protocol::DecodeStatus::Ok) {
+        failSession("Malformed reply to the result request.", common::LogLevel::Error);
+        return 0;
+    }
+
+    // 거절 — 사유를 갈라 말한다. "보관본이 없다"와 "이 서버는 재요청을 모른다"는 사용자가
+    // 다음에 할 일이 같더라도(재업로드) 원인이 다르고, 뭉뚱그리면 옛 서버에 붙은 것을
+    // 영영 모른다 (옛 서버는 type=7을 BadType으로 거절해 ProtocolError로 답한다).
+    if (_framer.messageType() == common::protocol::MessageType::Ack) {
+        common::protocol::Ack ack;
+        std::string reason = "The server refused the result request";
+        if (common::protocol::decode(_framer.message(), ack) ==
+            common::protocol::DecodeStatus::Ok) {
+            switch (ack.status) {
+                case common::protocol::AckStatus::NoSuchResult:
+                    reason = "The server no longer holds this result - the file must be sent again";
+                    break;
+                case common::protocol::AckStatus::ProtocolError:
+                    reason = "This server does not support resuming a result - "
+                             "the file must be sent again";
+                    break;
+                default:
+                    break;
+            }
+        }
+        dropResultClaim();  // 청구할 것이 없어졌다 — 버튼도 함께 잠긴다
+        _csv.clear();
+        failSession(reason, common::LogLevel::Warn);
+        return 0;
+    }
+
+    common::protocol::ResultHeader header;
+    if (common::protocol::decode(_framer.message(), header) !=
+        common::protocol::DecodeStatus::Ok) {
+        failSession("Cannot decode the result header.", common::LogLevel::Error);
+        return 0;
+    }
+    if (!beginCsvReceive(header, true)) {
+        return 0;
+    }
+    return result.consumed;
+}
+
 void TransferService::failSession(const std::string& reason, common::LogLevel level) {
     if (_uploading) {
         _reader.abortUpload();
@@ -653,7 +792,13 @@ void TransferService::failSession(const std::string& reason, common::LogLevel le
         drainRing();
     }
     _expecting = Expecting::Nothing;
-    _csv.clear();
+    if (_hasClaim) {
+        // 서버가 결과를 아직 들고 있을 수 있다. 여기서 _csv를 비우면 재개가 언제나 0부터가
+        // 되어, 끊길 때마다 처음부터 받는다 — 재개를 만든 이유가 사라진다.
+        _claim.received = _csv.size();
+    } else {
+        _csv.clear();
+    }
 
     pushLog(level, reason);
     closeSocket();

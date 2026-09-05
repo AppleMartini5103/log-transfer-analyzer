@@ -80,6 +80,7 @@ public:
         FullResult,       // Ack + ResultHeader + CSV — 정상 완주
         OversizedResult,  // ResultHeader에 상한 초과 csvSize를 선언한다 (본문은 보내지 않는다)
         RejectUpload,     // 실패 사유를 담은 Ack를 보내고 닫는다 (design 8번: 사유를 알리고 종료)
+        PartialResult,    // Ack + ResultHeader + CSV 앞부분만 보내고 끊는다 (결과 수신 중 단절)
     };
 
     explicit FakeServer(uv_loop_t* loop) : _listener(loop) {}
@@ -102,6 +103,12 @@ public:
     // ── IListenerCallback ──
     void onConnection() override {
         _accepted = _listener.acceptPending();
+        if (resetOnConnect) {
+            // 재요청은 새 연결로 온다 — 앞 연결의 업로드 바이트가 남아 있으면 그 뒤에
+            // 이어 붙어 메시지 경계가 어긋난다. 실서버도 세션마다 상태를 새로 잡는다.
+            received.clear();
+            _responded = false;
+        }
         if (_accepted) {
             _accepted->setCallback(this);
             _accepted->startRead();
@@ -118,6 +125,30 @@ public:
 
     void onRead(std::string_view data) override {
         received.append(data);
+
+        // 재요청은 업로드와 전혀 다른 메시지다 — 업로드 완료 판정에 섞이기 전에 갈라낸다
+        if (received.size() >= proto::kPreambleSize &&
+            static_cast<std::uint8_t>(received[proto::kOffsetType]) ==
+                static_cast<std::uint8_t>(proto::MessageType::ResultRequest)) {
+            std::size_t total = 0;
+            const proto::ByteView view{received.data(), received.size()};
+            if (proto::expectedMessageSize(view, total) != proto::DecodeStatus::Ok ||
+                received.size() < total) {
+                return;  // 아직 다 도착하지 않았다
+            }
+            proto::ResultRequest request;
+            if (proto::decode(proto::ByteView{received.data(), total}, request) !=
+                proto::DecodeStatus::Ok) {
+                closeAccepted();
+                return;
+            }
+            ++resumeRequests;
+            lastResumeOffset = request.startOffset;
+            lastResumeName = request.filename;
+            received.clear();
+            respondToResume(request);
+            return;
+        }
 
         // 페이로드가 시작되자마자 끊는 정책 (업로드 중 강제 단절)
         if (dropOnFirstPayload && received.size() > headerSize()) {
@@ -167,6 +198,15 @@ public:
     bool stallAfterHeader = false;
     std::uint64_t uploadSize = kSmallUpload;
     proto::AckStatus rejectStatus = proto::AckStatus::CrcMismatch;  // RejectUpload일 때 실을 사유
+
+    // 재개 시나리오 손잡이
+    std::size_t partialCsvBytes = 0;   // PartialResult일 때 보낼 CSV 앞부분 길이
+    bool resetOnConnect = false;       // 연결마다 수신 상태를 새로 잡는다
+    bool refuseResume = false;         // 재요청을 거절한다
+    proto::AckStatus resumeRejectStatus = proto::AckStatus::NoSuchResult;
+    int resumeRequests = 0;
+    std::uint64_t lastResumeOffset = 0;
+    std::string lastResumeName;
     std::string csv = "module,hour,count\nRadarTrackNodeState,2026-06-19 22,7\n";
 
     std::string received;
@@ -230,8 +270,39 @@ private:
         header.csvSize = csv.size();
         header.crc32 = common::crc32(0, csv);
         sendBytes(proto::encode(header));
+
+        if (policy == OnUploadComplete::PartialResult) {
+            // 헤더는 전체 크기를 말하고 본문은 일부만 보낸 뒤 끊는다 — 결과 수신 도중
+            // 링크가 끊긴 모양이다. 클라이언트는 받은 만큼을 들고 있어야 한다.
+            if (_accepted && partialCsvBytes > 0) {
+                _accepted->send(std::string_view{csv}.substr(0, partialCsvBytes));
+            }
+            closeAccepted();
+            return;
+        }
+
         if (_accepted) {
             _accepted->send(csv);
+        }
+    }
+
+    // ResultHeader는 언제나 완성 CSV 전체의 크기·CRC다. 뒤따르는 본문만 오프셋부터다.
+    void respondToResume(const proto::ResultRequest& request) {
+        if (refuseResume) {
+            proto::Ack ack;
+            ack.status = resumeRejectStatus;
+            ack.receivedBytes = 0;
+            sendBytes(proto::encode(ack));
+            closeAccepted();
+            return;
+        }
+        proto::ResultHeader header;
+        header.csvSize = csv.size();
+        header.crc32 = common::crc32(0, csv);
+        sendBytes(proto::encode(header));
+        if (_accepted && request.startOffset < csv.size()) {
+            _accepted->send(
+                std::string_view{csv}.substr(static_cast<std::size_t>(request.startOffset)));
         }
     }
 
@@ -372,6 +443,9 @@ struct Harness {
             if (event.hasUploadProgress) {
                 uploadProgress = event.uploadProgress;
             }
+            if (event.hasResultClaim) {
+                resultClaimAvailable = event.resultClaimAvailable;
+            }
             if (!event.message.empty()) {
                 logs.push_back(event.message);
                 if (event.level == common::LogLevel::Error) {
@@ -481,6 +555,10 @@ struct Harness {
     void startUpload() {
         service.post(client::StartUploadCommand{filePath, kUploadName, uploadBytes});
     }
+
+    void requestResult() { service.post(client::RequestResultCommand{}); }
+
+    bool resultClaimAvailable = false;
 
     uv_loop_t loop{};
     std::unique_ptr<FakeServer> server;
@@ -756,4 +834,134 @@ TEST_CASE("client scenario: quitting mid-upload joins every thread cleanly") {
     harness.service.stop();
     harness.service.stop();  // 여러 번 불러도 안전해야 한다 (stop 계약)
     SUCCEED("stop() returned without hanging");
+}
+
+// ── 결과 재개: 끊긴 다운로드가 재업로드를 요구하지 않는다 (리뷰 2차 3번) ──────
+//
+// 잃는 것은 CSV 몇 KB가 아니라 500MB 재업로드다. 그래서 검사의 핵심은 "결과를 다시
+// 받았다"가 아니라 "파일을 다시 보내지 않고 받았다"이다 — 아래 테스트들이 업로드
+// 바이트가 한 번만 흘렀는지(resumeRequests / connections)를 함께 본다.
+
+TEST_CASE("client: a broken result download resumes instead of re-sending the file") {
+    Harness harness;
+    harness.server->resetOnConnect = true;
+    harness.server->policy = FakeServer::OnUploadComplete::PartialResult;
+    harness.server->partialCsvBytes = 10;
+
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitForReusable());
+
+    INFO(harness.allLogs());
+    REQUIRE(harness.resultClaimAvailable);            // 청구할 것이 남았다
+    REQUIRE(harness.service.takeResultCsv().empty());  // 결과는 아직 손에 없다
+
+    harness.settle();
+    harness.connect();
+    harness.requestResult();
+    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }));
+
+    INFO(harness.allLogs());
+    REQUIRE(harness.server->resumeRequests == 1);
+    REQUIRE(harness.server->lastResumeOffset == 10);   // 받은 만큼부터 청구했다
+    REQUIRE(harness.server->lastResumeName == std::string(kUploadName));
+    REQUIRE(harness.service.takeResultCsv() == harness.server->csv);  // 이어 붙인 것이 원본과 같다
+    REQUIRE_FALSE(harness.resultClaimAvailable);       // 다 받았으니 청구할 것이 없다
+    REQUIRE(harness.sawLog("the file is not being sent again"));
+}
+
+TEST_CASE("client: a result lost before any byte arrived resumes from zero") {
+    // ResultHeader까지만 받고 끊긴 경우 — 재개 지점이 0이어도 재업로드는 여전히 없다
+    Harness harness;
+    harness.server->resetOnConnect = true;
+    harness.server->policy = FakeServer::OnUploadComplete::PartialResult;
+    harness.server->partialCsvBytes = 0;
+
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitForReusable());
+    REQUIRE(harness.resultClaimAvailable);
+
+    harness.settle();
+    harness.connect();
+    harness.requestResult();
+    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }));
+
+    INFO(harness.allLogs());
+    REQUIRE(harness.server->lastResumeOffset == 0);
+    REQUIRE(harness.service.takeResultCsv() == harness.server->csv);
+}
+
+TEST_CASE("client: a server that no longer holds the result says so and locks the button") {
+    Harness harness;
+    harness.server->resetOnConnect = true;
+    harness.server->policy = FakeServer::OnUploadComplete::PartialResult;
+    harness.server->partialCsvBytes = 10;
+
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitForReusable());
+    REQUIRE(harness.resultClaimAvailable);
+
+    harness.settle();
+    harness.server->refuseResume = true;
+    harness.server->resumeRejectStatus = proto::AckStatus::NoSuchResult;
+    harness.connect();
+    harness.requestResult();
+    REQUIRE(harness.waitFor([&] { return !harness.resultClaimAvailable; }));
+
+    INFO(harness.allLogs());
+    // 청구권이 사라져야 버튼이 잠긴다 — 남겨두면 누를 때마다 같은 거절을 반복한다
+    REQUIRE_FALSE(harness.resultClaimAvailable);
+    REQUIRE(harness.sawLog("no longer holds this result"));
+    REQUIRE(harness.sawLog("must be sent again"));
+}
+
+TEST_CASE("client: an older server that does not know the message says that instead") {
+    // 옛 서버는 type=7을 BadType으로 거부하고 ProtocolError를 답한다. 사용자가 할 일은
+    // 재업로드로 같지만 원인이 다르므로, 뭉뚱그리면 옛 서버에 붙은 것을 영영 모른다.
+    Harness harness;
+    harness.server->resetOnConnect = true;
+    harness.server->policy = FakeServer::OnUploadComplete::PartialResult;
+    harness.server->partialCsvBytes = 4;
+
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitForReusable());
+
+    harness.settle();
+    harness.server->refuseResume = true;
+    harness.server->resumeRejectStatus = proto::AckStatus::ProtocolError;
+    harness.connect();
+    harness.requestResult();
+    REQUIRE(harness.waitFor([&] { return !harness.resultClaimAvailable; }));
+
+    INFO(harness.allLogs());
+    REQUIRE(harness.sawLog("does not support resuming a result"));
+}
+
+TEST_CASE("client: nothing is claimable once the result has arrived whole") {
+    Harness harness;
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }));
+
+    INFO(harness.allLogs());
+    REQUIRE_FALSE(harness.resultClaimAvailable);  // 손에 든 결과를 다시 청구할 이유가 없다
+    REQUIRE(harness.service.takeResultCsv() == harness.server->csv);
+}
+
+TEST_CASE("client: a rejected upload leaves nothing to claim") {
+    // CRC 불일치로 거절된 업로드에는 서버가 만든 결과가 없다. 청구권을 Ack(Ok)에서만
+    // 켜는 이유가 이것이다 — 트레일러 송신 시점에 켜면 있지도 않은 결과를 청구하게 된다.
+    Harness harness;
+    harness.server->policy = FakeServer::OnUploadComplete::RejectUpload;
+    harness.server->rejectStatus = proto::AckStatus::CrcMismatch;
+
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitForReusable());
+
+    INFO(harness.allLogs());
+    REQUIRE_FALSE(harness.resultClaimAvailable);
 }

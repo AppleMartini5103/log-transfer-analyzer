@@ -51,6 +51,7 @@ const char* sessionLabel(SessionState session) {
         case SessionState::WaitAck:          return "Waiting for ack";
         case SessionState::WaitResult:       return "Analyzing on server";
         case SessionState::ReceivingResult:  return "Receiving result";
+        case SessionState::RequestingResult: return "Requesting result";
         case SessionState::Done:             return "Done";
         case SessionState::Idle:
         default:                             return "Idle";
@@ -171,6 +172,13 @@ void UiRenderer::renderTransferRow(UiState& state, const UiCallbacks& callbacks)
     ImGui::SameLine(kLabelWidth);
     ImGui::SetNextItemWidth(400.0f);
     ImGui::ProgressBar(state.downloadProgress, ImVec2(400.0f, 0.0f));
+    ImGui::SameLine();
+    // Get result — 결과 수신이 끊겼을 때 500MB를 다시 올리지 않고 결과만 다시 받는다.
+    // 과제가 지정한 네 컨트롤(연결·파일선택·전송·저장)은 그대로 두고 다섯 번째를 더한 것이다.
+    // 청구권이 없거나 끊겨 있으면 비활성이라, 평소에는 눌러도 아무 일 없는 버튼이 아니다.
+    if (buttonGated("Get result", state.canRequestResult())) {
+        invoke(callbacks.onRequestResult);
+    }
     ImGui::SameLine();
     if (buttonGated("Save", state.canSaveResult())) {
         invoke(callbacks.onSaveResult);

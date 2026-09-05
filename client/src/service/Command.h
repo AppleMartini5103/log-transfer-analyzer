@@ -33,11 +33,16 @@ struct StartUploadCommand {
 // 사용자 취소. 소켓 에러·타임아웃과 같은 CLEANUP 경로로 수렴한다 (design 7번).
 struct CancelUploadCommand {};
 
+// 결과 재요청. 결과 수신이 끊긴 뒤, 같은 파일을 다시 올리지 않고 서버가 보관한 결과를
+// 이어 받는다. 무엇을 청구하는지(파일명·크기·CRC)와 어디부터 받을지(오프셋)는 워커가
+// 직전 업로드에서 이미 알고 있으므로 본문이 없다 — UI가 그 값을 들고 다닐 이유가 없다.
+struct RequestResultCommand {};
+
 // 종료도 같은 통로로 보낸다: UI 스레드에서 uv_stop을 직접 부르는 것보다
 // 루프가 스스로 핸들을 닫고 uv_run을 반환하는 편이 정리 순서가 깔끔하다 (design 7번).
 struct QuitCommand {};
 
 using Command = std::variant<ConnectCommand, DisconnectCommand, StartUploadCommand,
-                             CancelUploadCommand, QuitCommand>;
+                             CancelUploadCommand, RequestResultCommand, QuitCommand>;
 
 }  // namespace client
