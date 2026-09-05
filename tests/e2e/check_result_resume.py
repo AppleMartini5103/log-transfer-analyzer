@@ -152,9 +152,10 @@ def main():
 
     failures = 0
     print()
-    print("=== resuming from three offsets ===")
-    # 0 = 한 바이트도 못 받은 채 끊김 / 중간 / 전체 = 마지막 바이트까지 받고 끊김.
-    # 양 끝을 넣는 이유는 "중간만 되는" 구현을 배제하기 위해서다.
+    print("=== resuming from four offsets ===")
+    # 0 = 한 바이트도 못 받은 채 끊김 / 절반 / 끝-1 / 끝 = 전부 받고 끊김.
+    # 양 끝을 넣는 이유는 "중간만 되는" 구현을 배제하기 위해서다. 특히 마지막 경우는
+    # 보낼 본문이 0바이트인데도 헤더로 답해야 하는 경계라, 그 경로가 따로 있어야 한다.
     for label, cut in (("nothing received", 0),
                        ("half received", len(reference) // 2),
                        ("all but the last byte", len(reference) - 1),
