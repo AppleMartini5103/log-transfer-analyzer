@@ -583,11 +583,20 @@ the queue alone would be defeated by any unbounded buffer downstream.
 |---|---|---|
 | Ring buffer | **4 MB budget** | slot count derived from the budget |
 | Line reassembly | 64 KB | maximum line length |
-| Header framing | 273 B | largest possible message |
+| Header framing | 285 B | largest possible message — `ResultRequest`, not `UploadHeader` |
 | Skip report samples | 100 lines × 200 B | explicit caps |
+| Unknown module names | 50 names × 64 B | distinct-name cap; the rest are counted, not stored |
 | Statistics map | 10,000 entries | entry limit |
 | Result CSV (build side) | ~5 KB in practice | 10,000 entries x 57 B row = 557 KB absolute ceiling |
+| Retained result | one CSV, same ceiling | replaced by the next completed analysis |
 | Result CSV (receive side) | **4 MiB** | `kMaxCsvSize`, checked before the buffer is reserved |
+
+Two of those rows arrived with the resume path and the unknown-module report, and both are bounded
+for the same reason the older rows are: a module name is text the sender chooses, so an unbounded
+map of them is an unbounded buffer fed by the input, and the retained result would grow with every
+session if it were kept rather than replaced. The framer's bound moved from 273 B to 285 B when
+`ResultRequest` became the largest variable-length message — it carries a filename like
+`UploadHeader` and three more fixed fields.
 
 **Zero-copy receive.** libuv asks the application for a buffer before every read. Instead of
 allocating one, the session hands back an empty ring slot, so bytes land directly in the queue the
