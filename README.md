@@ -9,7 +9,7 @@ Measured on the reference log (483 MB, 3,483,528 lines):
 
 | | |
 |---|---|
-| Server peak RSS | **8.4 MB** — 17% of the 50 MB limit. Receiving 483 MB adds **176 KB** to it |
+| Server peak RSS | **8.5 MB** — 17% of the 50 MB limit. Receiving 483 MB adds **180 KB** to it |
 | Corrupted lines | 26, skipped and reported |
 | Throughput | **87.1 MB/s** over a 1 Gb/s direct link; **11.3 MB/s** over 100 Mb/s (95% of line rate) |
 | Client memory | 49.5 MB idle, 98.5 MB during a 483 MB transfer — also independent of file size |
@@ -664,14 +664,27 @@ after a transfer, so the delta is attributable:
 
 | | VmHWM |
 |---|---|
-| Idle, before any session | 8,380 KB |
-| After receiving and analyzing 483 MB | 8,556 KB |
-| **Attributable to the transfer** | **176 KB** |
+| Idle, before any session | 8,508 KB |
+| After receiving and analyzing 483 MB | 8,688 KB |
+| **Attributable to the transfer** | **180 KB** |
+| After repeating the same upload three times | 8,688 KB — unchanged |
 
 Peak memory is essentially the startup footprint. Across arrival rates spanning 33x — 11.3 MB/s on
-100 Mb/s, 87.1 MB/s on 1 Gb/s, 375 MB/s on loopback — peak RSS stayed near 8.4 MB every time. The
-bound is not a claim about one measurement; it holds where the ring actually fills and where it
-never does.
+100 Mb/s, 87.1 MB/s on 1 Gb/s, 375 MB/s on loopback — the rate did not move it; every run landed
+within 0.1 MB of the idle figure. The bound is not a claim about one measurement; it holds where
+the ring actually fills and where it never does.
+
+The last row is the one that matters for the retained result. Repeating the same upload three times
+leaves the kernel's high-water mark exactly where it was, so the result kept for a re-request is
+replaced rather than accumulated — the numbers above are `VmHWM`, which only ever rises, so an
+unchanged value is evidence and not an average hiding growth. The idle figure rose from the 8,380 KB this
+table used to record, and that rise is startup footprint rather than either of the structures added
+for the re-request: it is already there before a session exists, while the retained result and the
+unknown-module tally are only filled after one ends.
+
+The chunk-size sweep above was measured on an earlier build and its absolute figures are that
+sweep's own; what it establishes is the comparison between chunk sizes, which a tenth of a megabyte
+does not change.
 
 **Client, measured with the real GUI over a real link:**
 
