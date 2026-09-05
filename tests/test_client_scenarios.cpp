@@ -965,3 +965,65 @@ TEST_CASE("client: a rejected upload leaves nothing to claim") {
     INFO(harness.allLogs());
     REQUIRE_FALSE(harness.resultClaimAvailable);
 }
+
+TEST_CASE("client: a result lost before its header still resumes, and says so honestly") {
+    // 사용자가 "analyzing" 중에 Disconnect를 누른 모양 — Ack(OK)는 받았으니 서버는 결과를
+    // 만들지만 ResultHeader는 오지 않았다. 청구권은 있고 전체 크기는 모른다.
+    Harness harness;
+    harness.server->resetOnConnect = true;
+    harness.server->policy = FakeServer::OnUploadComplete::AckThenDrop;
+
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitForReusable());
+    REQUIRE(harness.resultClaimAvailable);
+
+    harness.settle();
+    harness.connect();
+    harness.requestResult();
+    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }));
+
+    INFO(harness.allLogs());
+    REQUIRE(harness.server->lastResumeOffset == 0);
+    REQUIRE(harness.service.takeResultCsv() == harness.server->csv);
+
+    // 전체 크기를 모르면서 아는 척하지 않는다. "of 0 bytes"는 빈 결과와 구별되지 않고,
+    // 지난 세션 값이 남아 있으면 남의 숫자를 말하게 된다 — 둘 다 실제로 그랬다.
+    REQUIRE(harness.sawLog("Requesting the result from the beginning"));
+    // 금지해야 할 것은 "요청 줄이 모르는 총계를 말하는 것"이다. 로그 전체에서 "of N bytes"를
+    // 금지하면 재개 성공 메시지("Resuming result.csv at 0 of 54 bytes")까지 걸린다 —
+    // 처음 이렇게 써서 정상 동작을 실패로 판정했다.
+    REQUIRE_FALSE(harness.sawLog("Requesting the result from 0 of"));
+}
+
+TEST_CASE("client: a second upload does not inherit the first result's size") {
+    // 첫 세션이 ResultHeader를 받아 _csvSize를 채운 뒤, 두 번째 세션이 그 헤더를 받기 전에
+    // 끊긴다. 초기화를 빼먹으면 재요청 로그가 지난 세션의 크기를 자기 것처럼 말한다 —
+    // 조용히 틀린 숫자라 눈으로는 거의 잡히지 않는다.
+    Harness harness;
+    harness.server->resetOnConnect = true;
+
+    harness.server->policy = FakeServer::OnUploadComplete::FullResult;
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }));
+    const std::size_t firstSize = harness.server->csv.size();
+    REQUIRE(firstSize > 0);
+
+    harness.settle();
+    harness.server->policy = FakeServer::OnUploadComplete::AckThenDrop;
+    harness.connect();
+    harness.startUpload();
+    REQUIRE(harness.waitForReusable());
+    REQUIRE(harness.resultClaimAvailable);
+
+    harness.settle();
+    harness.connect();
+    harness.requestResult();
+    REQUIRE(harness.waitFor([&] { return harness.session == SessionState::Done; }));
+
+    INFO(harness.allLogs());
+    REQUIRE(harness.sawLog("Requesting the result from the beginning"));
+    REQUIRE_FALSE(harness.sawLog("Requesting the result from 0 of " +
+                                 std::to_string(firstSize)));
+}

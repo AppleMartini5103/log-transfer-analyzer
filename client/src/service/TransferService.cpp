@@ -361,6 +361,10 @@ void TransferService::handle(const StartUploadCommand& command) {
     _trailerSent = false;
     _expecting = Expecting::Nothing;
     _csv.clear();
+    // 지난 세션의 결과 크기를 물려받지 않는다. 이 값이 남아 있으면 이번 세션이
+    // ResultHeader를 받기도 전에 끊겼을 때 로그가 남의 숫자를 말한다.
+    _csvSize = 0;
+    _csvExpectedCrc = 0;
     {
         const std::lock_guard<std::mutex> lock(_resultMutex);
         _resultCsv.clear();  // 새 세션이 시작되면 지난 결과는 버린다
@@ -731,9 +735,14 @@ void TransferService::handle(const RequestResultCommand&) {
     _framer.reset(common::protocol::MessageType::Ack, common::protocol::MessageType::ResultHeader);
     _expecting = Expecting::ResumeReply;
     _sessionCompleted = false;
+    // _csvSize == 0은 "결과가 비어 있다"가 아니라 "ResultHeader를 아직 못 받아 전체 크기를
+    // 모른다"이다. 빈 결과는 그 자리에서 완료되므로 청구권이 남지 않는다.
+    const std::string position =
+        _csvSize == 0 ? std::string("from the beginning")
+                      : "from " + std::to_string(_claim.received) + " of " +
+                            std::to_string(_csvSize) + " bytes";
     pushLog(common::LogLevel::Info,
-            "Requesting the result from " + std::to_string(_claim.received) + " of " +
-                std::to_string(_csvSize) + " bytes - the file is not being sent again");
+            "Requesting the result " + position + " - the file is not being sent again");
     pushSession(SessionState::RequestingResult);
 }
 

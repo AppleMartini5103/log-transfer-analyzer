@@ -491,7 +491,7 @@ threads would leave the child with locked mutexes and nobody to unlock them.
 
 ## 4. The client
 
-![client after a completed transfer](client/docs/client-result.jpg)
+![client after a completed transfer](client/docs/client-result.png)
 
 The four controls the assignment asks for map onto the window like this:
 
@@ -906,7 +906,7 @@ unit test pins.
 ## 8. Tests
 
 ```bash
-ctest --test-dir build --output-on-failure          # 168 unit tests
+ctest --test-dir build --output-on-failure          # 220 test cases
 python3 tests/e2e/run_e2e.py --server build/server/server
 python3 tests/perf/sweep.py  --server build/server/server
 ```
@@ -914,7 +914,7 @@ python3 tests/perf/sweep.py  --server build/server/server
 The end-to-end driver and the benchmark sweep use the Python standard library only — no
 installation step.
 
-**Unit tests (Catch2, 168 cases)** cover the CRC vector
+**Unit tests (Catch2, 220 cases on Linux, 105 on Windows)** cover the CRC vector
 (`"123456789"` → `0xCBF43926`), codec round trips including every truncation point, framer
 accumulation, SPSC ring behaviour under two-thread contention, each validation stage with its own
 damaged-line fixture, and the session state machine driven over real loopback sockets. Three of the
@@ -922,7 +922,13 @@ four state timers are covered directly — a stalled upload in `RECEIVING`, a gh
 `WAIT_HEADER`, and a client that never acknowledges in `WAIT_DONE` — and each asserts that the next
 connection is served afterwards, because on a 1:1 server a timer that fails to reap does not leak a
 session, it stops the server. On the client side, a server that rejects an upload is covered for all
-four Ack statuses, asserting the reason reaches the log rather than the session failing silently.
+four rejection statuses an upload can draw, asserting the reason reaches the log rather than the
+session failing silently; the fifth, `NoSuchResult`, belongs to the re-request path and is covered
+there.
+
+The two counts differ because the server tests are excluded from the Windows build — the server is
+Linux-only, and `SIGPIPE`, daemonisation and the session state machine have nothing to run against
+there. Everything shared between the two programs, and the client's own tests, run on both.
 
 **End-to-end scenarios (15)** run against the real server binary and speak the protocol from an
 independent Python implementation — deliberately not reusing the server's own codec, and using
@@ -933,6 +939,17 @@ header split byte by byte, abrupt disconnection during upload and during result 
 behaviour with two clients, peak RSS under the limit, and daemon mode. Two further scenarios are
 opt-in because they are slow: the full 483 MB log (`--log <path>`) and the 120-second header timeout
 (`--slow`).
+
+Three further scripts sit beside that driver and are run on their own, because each needs
+conditions the driver does not create and each answers one review finding:
+
+| Script | Establishes |
+|---|---|
+| `check_corrupt_isolation.py` | a failed upload's statistics never reach the next session — needs the server pinned to one core before the race is visible at all |
+| `check_unknown_module.py` | what an unrecognised module actually costs, and that the loss is stated rather than silent |
+| `check_result_resume.py` | a broken result download resumes instead of costing the upload, measured in bytes sent |
+
+Sections 3.1 and 6 describe what each of them showed.
 
 Every scenario also asserts that the server exits cleanly afterwards. That check found a real
 regression: a shutdown deadlock in which the process never left its event loop.
